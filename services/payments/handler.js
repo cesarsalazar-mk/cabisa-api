@@ -79,6 +79,7 @@ module.exports.crupdate = async event => {
             payment_date: { type: 'string', required: true },
             related_external_document: { type: 'string' },
             description: { type: 'string' },
+            attachment_url: { type: 'string' },
           },
         },
       },
@@ -177,6 +178,7 @@ module.exports.crupdate = async event => {
               '${payment_date}',
               ${p.related_external_document ? `'${p.related_external_document}'` : null},
               ${p.description ? `'${p.description}'` : null},
+              ${p.attachment_url ? `'${p.attachment_url}'` : null},
               '${created_at}',
               ${oldPayment && oldPayment.created_by ? oldPayment.created_by : req.currentUser.user_id}
             )`

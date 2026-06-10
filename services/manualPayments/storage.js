@@ -27,6 +27,7 @@ const findAllBy = (fields = {}) => {
   paydetail.payment_method AS payments__payment_method,
   paydetail.payment_date AS payments__payment_date,
   paydetail.description AS payments__description,
+  paydetail.attachment_url AS payments__attachment_url,
   paydetail.is_deleted AS payments__is_deleted,
   paydetail.created_at AS payments__created_at,
   paydetail.created_by AS payments__created_by
@@ -63,6 +64,7 @@ paydetail.payment_amount AS old_payments__payment_amount,
 paydetail.payment_method AS old_payments__payment_method,
 paydetail.payment_date AS old_payments__payment_date,
 paydetail.description AS old_payments__description,
+paydetail.attachment_url AS old_payments__attachment_url,
 paydetail.is_deleted AS old_payments__is_deleted,
 paydetail.created_at AS old_payments__created_at,
 paydetail.created_by AS old_payments__created_by
@@ -79,7 +81,7 @@ const deletePayments = paymentsIds => `UPDATE manual_payments_detail SET is_dele
 const updateManualPaymentStatus = (id,status) => `UPDATE manual_payments SET status = '${status}' WHERE id = ${id}`
 
 const crupdatePayments = crupdatePaymentsValues => `
-  INSERT INTO manual_payments_detail (id, manual_payment,payment_method, payment_amount, payment_date, related_external_document, description, created_at, created_by)
+  INSERT INTO manual_payments_detail (id, manual_payment, payment_method, payment_amount, payment_date, related_external_document, description, attachment_url, created_at, created_by)
   VALUES ${crupdatePaymentsValues.join(', ')}
   ON DUPLICATE KEY UPDATE
     id = VALUES(id),
@@ -89,6 +91,7 @@ const crupdatePayments = crupdatePaymentsValues => `
     payment_date = VALUES(payment_date),
     related_external_document = VALUES(related_external_document),
     description = VALUES(description),
+    attachment_url = VALUES(attachment_url),
     created_at = VALUES(created_at),
     created_by = VALUES(created_by)
 `
