@@ -60,6 +60,7 @@ const findAllBy = (fields = {}) => {
       pay.payment_date AS payments__payment_date,
       pay.related_external_document AS payments__related_external_document,
       pay.description AS payments__description,
+      pay.attachment_url AS payments__attachment_url,
       pay.is_deleted AS payments__is_deleted,
       pay.created_at AS payments__created_at,
       pay.created_by AS payments__created_by
@@ -96,6 +97,7 @@ const findDocumentPayments = () => `
     p.payment_method AS old_payments__payment_method,
     p.payment_date AS old_payments__payment_date,
     p.description AS old_payments__description,
+    p.attachment_url AS old_payments__attachment_url,
     p.is_deleted AS old_payments__is_deleted,
     p.created_at AS old_payments__created_at,
     p.created_by AS old_payments__created_by
@@ -112,7 +114,7 @@ const findDocumentPayments = () => `
 const deletePayments = paymentsIds => `UPDATE payments SET is_deleted = 1 WHERE id IN (${paymentsIds.join(', ')})`
 
 const crupdatePayments = crupdatePaymentsValues => `
-  INSERT INTO payments (id, document_id, payment_method, payment_amount, payment_date, related_external_document, description, created_at, created_by)
+  INSERT INTO payments (id, document_id, payment_method, payment_amount, payment_date, related_external_document, description, attachment_url, created_at, created_by)
   VALUES ${crupdatePaymentsValues.join(', ')}
   ON DUPLICATE KEY UPDATE
     id = VALUES(id),
@@ -122,6 +124,7 @@ const crupdatePayments = crupdatePaymentsValues => `
     payment_date = VALUES(payment_date),
     related_external_document = VALUES(related_external_document),
     description = VALUES(description),
+    attachment_url = VALUES(attachment_url),
     created_at = VALUES(created_at),
     created_by = VALUES(created_by)
 `
@@ -135,6 +138,7 @@ const getPaymentsByDocumentId = () => `
     payment_date,
     related_external_document,
     description,
+    attachment_url,
     created_at,
     created_by
   FROM payments
