@@ -231,7 +231,37 @@ module.exports.salesProductReport = async event => {
     const req = await handleRequest({ event })
     req.hasPermissions([types.permissions.REPORTS])
     const res = await handleRead(req, { dbQuery: db.query, storage: storage.getSalesProductReport })
-    return await handleResponse({ req, res })
+
+    const filterFields = storage.stripPaginationFields(req.query)
+
+    const summaryRows = await db.query(storage.getSalesProductReportSummary(filterFields))
+    const topProductRows = await db.query(storage.getTopSoldItem(filterFields, types.productsTypes.PRODUCT))
+    const topServiceRows = await db.query(storage.getTopSoldItem(filterFields, types.productsTypes.SERVICE))
+    const countResult = await db.query(storage.getSalesProductReportCount(req.query))
+
+    const getSummaryByType = productType =>
+      summaryRows.find(row => row.product_type === productType) || {}
+
+    const summary = {
+      top_product: topProductRows[0] || null,
+      top_service: topServiceRows[0] || null,
+      products_total_quantity: getSummaryByType(types.productsTypes.PRODUCT).total_quantity || 0,
+      services_total_quantity: getSummaryByType(types.productsTypes.SERVICE).total_quantity || 0,
+      products_total_amount: getSummaryByType(types.productsTypes.PRODUCT).total_amount || 0,
+      services_total_amount: getSummaryByType(types.productsTypes.SERVICE).total_amount || 0,
+    }
+
+    return await handleResponse({
+      req,
+      res: {
+        statusCode: 200,
+        data: {
+          items: res.data,
+          summary,
+          pagination: { total: countResult[0]?.total || 0 },
+        },
+      },
+    })
   } catch (error) {
     console.log(error)
     return await handleResponse({ error })
@@ -507,13 +537,15 @@ module.exports.exportReport = async event => {
             { name: 'Cantidad', column: 'quantity', width: 20}]
       case "salesProducts":
         req.hasPermissions([types.permissions.REPORTS])
-        result = await handleRead(req, { dbQuery: db.query, storage: storage.getSalesProductReport })    
-        manifestoHeaders = [          
-          { name: 'Codigo de producto', column: 'code', width: 18 },                    
-          { name: 'Nombre / Descripcion', column: 'description', width: 40,},
-          { name: 'Cantidad de productos vendidos', column: 'product_quantity', width: 15 },                    
-          { name: 'Total vendido', column: 'total_amount', width: 15 ,numFmt: '"Q"#,##0.00'},          
+        result = await handleRead(req, { dbQuery: db.query, storage: storage.getSalesProductReport })
+        manifestoHeaders = [
+          { name: 'Tipo', column: 'product_type', width: 15 },
+          { name: 'Codigo', column: 'code', width: 18 },
+          { name: 'Nombre / Descripcion', column: 'description', width: 40 },
+          { name: 'Cantidad vendida', column: 'product_quantity', width: 15 },
+          { name: 'Total vendido', column: 'total_amount', width: 15, numFmt: '"Q"#,##0.00' },
         ]
+        break
       default:
         break;
     }

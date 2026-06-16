@@ -532,24 +532,105 @@ return `
 `
 }
 
-const getSalesProductReport = (fields = {}) => {
+const LINE_ITEM_TOTAL = '(dp.product_price + dp.unit_tax_amount - IFNULL(dp.unit_discount_amount, 0)) * dp.product_quantity'
+
+const SALES_PRODUCT_REPORT_BASE_FROM = `
+    FROM products prod
+    INNER JOIN documents_products dp ON prod.id = dp.product_id
+    INNER JOIN documents d ON dp.document_id = d.id AND d.status = 'APPROVED'
+    WHERE (d.document_type = 'SELL_INVOICE' OR d.document_type = 'RENT_INVOICE')`
+
+const buildSalesProductReportWhere = (fields = {}) => {
   const rawWhereConditions = getWhereConditions({ fields, tableAlias: 'd' })
-  const whereConditions = rawWhereConditions.replace(/d.code/i, 'prod.code').replace(/d.description/i, 'prod.description').replace(/d.start_date/i, 'DATE(d.created_at)').replace(/d.end_date/i, 'DATE(d.created_at)')
+
+  return rawWhereConditions
+    .replace(/d\.code/gi, 'prod.code')
+    .replace(/d\.description/gi, 'prod.description')
+    .replace(/d\.start_date/gi, 'DATE(d.created_at)')
+    .replace(/d\.end_date/gi, 'DATE(d.created_at)')
+    .replace(/d\.product_type/gi, 'prod.product_type')
+}
+
+const stripPaginationFields = (fields = {}) => {
+  const { $limit, $offset, ...filterFields } = fields
+
+  return filterFields
+}
+
+const buildPaginationSQL = (fields = {}) => {
+  const limit = fields.$limit
+  const offset = fields.$offset
+
+  if (!limit) return ''
+
+  const offsetSQL = offset ? ` OFFSET ${offset}` : ''
+
+  return `LIMIT ${limit}${offsetSQL}`
+}
+
+const getSalesProductReport = (fields = {}) => {
+  const whereConditions = buildSalesProductReportWhere(stripPaginationFields(fields))
+  const paginationSQL = buildPaginationSQL(fields)
 
   return `
   SELECT
         prod.id AS id,
-        prod.code as code,
-        prod.description as description,
-        SUM(dp.product_quantity) as product_quantity,
-        SUM(d.total_amount) as total_amount
-    FROM products prod
-    INNER JOIN documents_products dp on prod.id = dp.product_id
-    INNER JOIN documents d on dp.document_id = d.id and d.status = 'APPROVED'
-    WHERE 1 = 1
-    and (d.document_type = 'SELL_INVOICE' OR d.document_type = 'RENT_INVOICE')    
+        prod.code AS code,
+        prod.description AS description,
+        prod.product_type AS product_type,
+        SUM(dp.product_quantity) AS product_quantity,
+        SUM(${LINE_ITEM_TOTAL}) AS total_amount
+    ${SALES_PRODUCT_REPORT_BASE_FROM}
     ${whereConditions}
-    GROUP by prod.id;
+    GROUP BY prod.id
+    ORDER BY product_quantity DESC
+    ${paginationSQL};
+  `
+}
+
+const getSalesProductReportCount = (fields = {}) => {
+  const whereConditions = buildSalesProductReportWhere(stripPaginationFields(fields))
+
+  return `
+  SELECT COUNT(*) AS total
+  FROM (
+    SELECT prod.id
+    ${SALES_PRODUCT_REPORT_BASE_FROM}
+    ${whereConditions}
+    GROUP BY prod.id
+  ) AS grouped_items;
+  `
+}
+
+const getSalesProductReportSummary = (fields = {}) => {
+  const whereConditions = buildSalesProductReportWhere(fields)
+
+  return `
+  SELECT
+    prod.product_type AS product_type,
+    SUM(dp.product_quantity) AS total_quantity,
+    SUM(${LINE_ITEM_TOTAL}) AS total_amount
+  ${SALES_PRODUCT_REPORT_BASE_FROM}
+  ${whereConditions}
+  GROUP BY prod.product_type;
+  `
+}
+
+const getTopSoldItem = (fields = {}, productType) => {
+  const whereConditions = buildSalesProductReportWhere(fields)
+
+  return `
+  SELECT
+    prod.code AS code,
+    prod.description AS description,
+    SUM(dp.product_quantity) AS product_quantity,
+    SUM(${LINE_ITEM_TOTAL}) AS total_amount
+  ${SALES_PRODUCT_REPORT_BASE_FROM}
+  AND prod.product_type = '${productType}'
+  ${whereConditions}
+  GROUP BY prod.id
+  ORDER BY product_quantity DESC
+  LIMIT 1;
   `
 }
 
@@ -562,5 +643,9 @@ module.exports = {
   getReceipts,
   getManualReceipts,
   getServiceOrders,
-  getSalesProductReport
+  getSalesProductReport,
+  getSalesProductReportCount,
+  getSalesProductReportSummary,
+  getTopSoldItem,
+  stripPaginationFields,
 }
