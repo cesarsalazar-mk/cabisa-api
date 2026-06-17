@@ -546,6 +546,7 @@ module.exports.exportReport = async event => {
         result = await handleRead(req, { dbQuery: db.query, storage: storage.getSalesProductReport })
         manifestoHeaders = [
           { name: 'Tipo', column: 'item_type_spanish', width: 15 },
+          { name: 'Categoria', column: 'sales_category_spanish', width: 15 },
           { name: 'Codigo', column: 'code', width: 18 },
           { name: 'Nombre / Descripcion', column: 'description', width: 40 },
           { name: 'Cantidad vendida', column: 'product_quantity', width: 15 },

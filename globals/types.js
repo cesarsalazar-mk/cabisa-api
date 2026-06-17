@@ -64,6 +64,13 @@ const productsCategories = {
   PART: 'PART',
 }
 
+const salesCategories = {
+  SC: 'sc',
+  SE: 'se',
+  SF: 'sf',
+  SO: 'so',
+}
+
 const productsStatus = {
   ACTIVE: 'ACTIVE',
   INACTIVE: 'INACTIVE',
@@ -137,6 +144,7 @@ module.exports = {
   operationsTypes,
   permissions,
   productsCategories,
+  salesCategories,
   productsStatus,
   productsTypes,
   rolesStatus,

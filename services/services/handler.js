@@ -36,11 +36,12 @@ module.exports.create = async event => {
       status: { type: { enum: types.productsStatus }, required: true },
       code: { type: 'string', length: 50, required: true, unique: true },
       description: { type: 'string', length: 255, required: true },
+      sales_category: { type: { enum: types.salesCategories } },
     }
     const req = await handleRequest({ event, inputType })
     req.hasPermissions([types.permissions.INVENTORY])
 
-    const { status, code, description } = req.body
+    const { status, code, description, sales_category } = req.body
     const product_type = types.productsTypes.SERVICE
     const errors = []
     const requiredFields = ['status', 'code', 'description']
@@ -61,7 +62,14 @@ module.exports.create = async event => {
     if (errors.length > 0) throw new ValidatorException(errors)
 
     const res = await db.transaction(async connection => {
-      await connection.query(storage.createService(), [status, code, description, tax.id, req.currentUser.user_id])
+      await connection.query(storage.createService(), [
+        status,
+        code,
+        description,
+        tax.id,
+        sales_category || null,
+        req.currentUser.user_id,
+      ])
 
       return { statusCode: 201, data: { id: await connection.geLastInsertId() }, message: 'Servicio creado exitosamente' }
     })
@@ -80,11 +88,12 @@ module.exports.update = async event => {
       status: { type: { enum: types.productsStatus }, required: true },
       code: { type: 'string', length: 50, required: true, unique: true },
       description: { type: 'string', length: 255, required: true },
+      sales_category: { type: { enum: types.salesCategories } },
     }
     const req = await handleRequest({ event, inputType, dbQuery: db.query, storage: storage.findAllBy })
     req.hasPermissions([types.permissions.INVENTORY])
 
-    const { id, status, code, description } = req.body
+    const { id, status, code, description, sales_category } = req.body
     const errors = []
     const requiredFields = ['id', 'status', 'code', 'description']
     const requiredErrorFields = requiredFields.filter(k => !req.body[k])
@@ -102,7 +111,14 @@ module.exports.update = async event => {
     if (errors.length > 0) throw new ValidatorException(errors)
 
     const res = await db.transaction(async connection => {
-      await connection.query(storage.updateService(), [status, code, description, req.currentUser.user_id, id])
+      await connection.query(storage.updateService(), [
+        status,
+        code,
+        description,
+        sales_category || null,
+        req.currentUser.user_id,
+        id,
+      ])
 
       return { statusCode: 200, data: { id }, message: 'Servicio actualizado exitosamente' }
     })

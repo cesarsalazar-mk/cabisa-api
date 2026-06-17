@@ -548,6 +548,15 @@ const SALES_ITEM_TYPE_SPANISH_SQL = `
     ELSE 'Producto'
   END`
 
+const SALES_CATEGORY_SPANISH_SQL = `
+  CASE prod.sales_category
+    WHEN '${types.salesCategories.SC}' THEN 'Cabina'
+    WHEN '${types.salesCategories.SE}' THEN 'Equipo'
+    WHEN '${types.salesCategories.SF}' THEN 'Fosa'
+    WHEN '${types.salesCategories.SO}' THEN 'Otros'
+    ELSE ''
+  END`
+
 const SALES_PRODUCT_REPORT_BASE_FROM = `
     FROM products prod
     INNER JOIN documents_products dp ON prod.id = dp.product_id
@@ -580,7 +589,8 @@ const buildSalesProductReportWhere = (fields = {}, itemType = null) => {
     .replace(/d\.start_date/gi, 'DATE(d.created_at)')
     .replace(/d\.end_date/gi, 'DATE(d.created_at)')
     .replace(/d\.product_type/gi, 'prod.product_type')
-    .replace(/d\.item_type/gi, SALES_ITEM_TYPE_SQL)}${buildItemTypeFilter(resolvedItemType)}`
+    .replace(/d\.item_type/gi, SALES_ITEM_TYPE_SQL)
+    .replace(/d\.sales_category/gi, 'prod.sales_category')}${buildItemTypeFilter(resolvedItemType)}`
 }
 
 const stripPaginationFields = (fields = {}) => {
@@ -611,6 +621,8 @@ const getSalesProductReport = (fields = {}) => {
         prod.description AS description,
         ${SALES_ITEM_TYPE_SQL} AS item_type,
         ${SALES_ITEM_TYPE_SPANISH_SQL} AS item_type_spanish,
+        prod.sales_category AS sales_category,
+        ${SALES_CATEGORY_SPANISH_SQL} AS sales_category_spanish,
         SUM(dp.product_quantity) AS product_quantity,
         SUM(${LINE_ITEM_TOTAL}) AS total_amount
     ${SALES_PRODUCT_REPORT_BASE_FROM}
