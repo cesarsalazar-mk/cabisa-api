@@ -1,6 +1,46 @@
 const { types, getWhereConditions } = require(`${process.env['FILE_ENVIRONMENT']}/globals`)
 
-const findAllBy = (fields = {}, initWhereCondition = `p.product_type = '${types.productsTypes.PRODUCT}'`) => `
+const stripPaginationFields = (fields = {}) => {
+  const { $limit, $offset, ...filterFields } = fields
+
+  return filterFields
+}
+
+const buildPaginationSQL = (fields = {}) => {
+  const limit = fields.$limit
+  const offset = fields.$offset
+
+  if (!limit) return ''
+
+  const offsetSQL = offset ? ` OFFSET ${offset}` : ''
+
+  return `LIMIT ${limit}${offsetSQL}`
+}
+
+const getInitWhereConditionForAlias = (initWhereCondition, alias) =>
+  initWhereCondition.replace(/\bp\./g, `${alias}.`)
+
+const findAllBy = (fields = {}, initWhereCondition = `p.product_type = '${types.productsTypes.PRODUCT}'`) => {
+  const filterFields = stripPaginationFields(fields)
+  const paginationSQL = buildPaginationSQL(fields)
+  const whereConditions = getWhereConditions({ fields: filterFields, tableAlias: 'p' })
+  const paginationSubquery = paginationSQL
+    ? `
+  AND p.id IN (
+    SELECT id FROM (
+      SELECT p2.id
+      FROM products p2
+      WHERE ${getInitWhereConditionForAlias(initWhereCondition, 'p2')} ${getWhereConditions({
+        fields: filterFields,
+        tableAlias: 'p2',
+      })}
+      ORDER BY p2.id DESC
+      ${paginationSQL}
+    ) AS paginated_products
+  )`
+    : ''
+
+  return `
   SELECT
     p.id,
     p.product_category,
@@ -30,9 +70,21 @@ const findAllBy = (fields = {}, initWhereCondition = `p.product_type = '${types.
   LEFT JOIN inventory_movements im ON im.product_id = p.id
   LEFT JOIN inventory_movements_details imd ON imd.inventory_movement_id = im.id
   LEFT JOIN operations o ON o.id = im.operation_id
-  WHERE ${initWhereCondition} ${getWhereConditions({ fields, tableAlias: 'p' })}
+  WHERE ${initWhereCondition} ${whereConditions}
+  ${paginationSubquery}
   ORDER BY p.id DESC
-`
+  `
+}
+
+const findAllByCount = (fields = {}, initWhereCondition = `p.product_type = '${types.productsTypes.PRODUCT}'`) => {
+  const filterFields = stripPaginationFields(fields)
+
+  return `
+  SELECT COUNT(*) AS total
+  FROM products p
+  WHERE ${initWhereCondition} ${getWhereConditions({ fields: filterFields, tableAlias: 'p' })};
+  `
+}
 
 const findProductsCategories = () => `DESCRIBE products product_category`
 
@@ -95,6 +147,7 @@ module.exports = {
   createProduct,
   deleteProduct,
   findAllBy,
+  findAllByCount,
   findOptionsBy,
   findProductsCategories,
   findProductsStatus,

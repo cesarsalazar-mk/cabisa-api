@@ -9,8 +9,18 @@ module.exports.read = async event => {
     const req = await handleRequest({ event })
 
     const res = await handleRead(req, { dbQuery: db.query, storage: storage.findAllBy, nestedFieldsKeys: ['product_history'] })
+    const countResult = await db.query(storage.findAllByCount(req.query))
 
-    return await handleResponse({ req, res })
+    return await handleResponse({
+      req,
+      res: {
+        statusCode: 200,
+        data: {
+          items: res.data,
+          pagination: { total: countResult[0]?.total || 0 },
+        },
+      },
+    })
   } catch (error) {
     console.log(error)
     return await handleResponse({ error })
