@@ -1,8 +1,50 @@
 const { types, getWhereConditions } = require(`${process.env['FILE_ENVIRONMENT']}/globals`)
 
+const stripPaginationFields = (fields = {}) => {
+  const { $limit, $offset, ...filterFields } = fields
+
+  return filterFields
+}
+
+const buildPaginationSQL = (fields = {}) => {
+  const limit = fields.$limit
+  const offset = fields.$offset
+
+  if (!limit) return ''
+
+  const offsetSQL = offset ? ` OFFSET ${offset}` : ''
+
+  return `LIMIT ${limit}${offsetSQL}`
+}
+
+const getInvoiceTypeCondition = (alias = 'd') =>
+  `(${alias}.document_type = '${types.documentsTypes.SELL_INVOICE}' OR ${alias}.document_type = '${types.documentsTypes.RENT_INVOICE}')`
+
+const buildWhereConditions = (fields = {}, docAlias = 'd', stakeholderAlias = 's') => {
+  const rawWhereConditions = getWhereConditions({ fields, tableAlias: docAlias })
+
+  return rawWhereConditions
+    .replace(new RegExp(`${docAlias}\\.nit`, 'gi'), `${stakeholderAlias}.nit`)
+    .replace(new RegExp(`${docAlias}\\.name`, 'gi'), `${stakeholderAlias}.name`)
+}
+
 const findAllBy = (fields = {}) => {
-  const rawWhereConditions = getWhereConditions({ fields, tableAlias: 'd' })
-  const whereConditions = rawWhereConditions.replace(/d.nit/i, 's.nit').replace(/d.name/i, 's.name')
+  const filterFields = stripPaginationFields(fields)
+  const paginationSQL = buildPaginationSQL(fields)
+  const whereConditions = buildWhereConditions(filterFields)
+  const paginationSubquery = paginationSQL
+    ? `
+    AND d.id IN (
+      SELECT id FROM (
+        SELECT d2.id
+        FROM documents d2
+        LEFT JOIN stakeholders s2 ON s2.id = d2.stakeholder_id
+        WHERE ${getInvoiceTypeCondition('d2')} ${buildWhereConditions(filterFields, 'd2', 's2')}
+        ORDER BY d2.id DESC
+        ${paginationSQL}
+      ) AS paginated_documents
+    )`
+    : ''
 
   return `
     SELECT
@@ -59,12 +101,21 @@ const findAllBy = (fields = {}) => {
     LEFT JOIN stakeholders s ON s.id = d.stakeholder_id
     LEFT JOIN documents_products dp ON dp.document_id = d.id
     LEFT JOIN products prod ON prod.id = dp.product_id
-    WHERE (
-      d.document_type = '${types.documentsTypes.SELL_INVOICE}' OR
-      d.document_type = '${types.documentsTypes.RENT_INVOICE}'
-    ) ${whereConditions}
+    WHERE ${getInvoiceTypeCondition('d')} ${whereConditions}
+    ${paginationSubquery}
     ORDER BY d.id DESC
-    LIMIT 200
+  `
+}
+
+const findAllByCount = (fields = {}) => {
+  const filterFields = stripPaginationFields(fields)
+  const whereConditions = buildWhereConditions(filterFields)
+
+  return `
+  SELECT COUNT(*) AS total
+  FROM documents d
+  LEFT JOIN stakeholders s ON s.id = d.stakeholder_id
+  WHERE ${getInvoiceTypeCondition('d')} ${whereConditions};
   `
 }
 
@@ -93,6 +144,7 @@ module.exports = {
   checkInventoryMovementsOnApprove,
   checkProjectExists,
   findAllBy,
+  findAllByCount,
   findCreditStatus,
   findInvoiceServiceType,
   findInvoiceStatus,
