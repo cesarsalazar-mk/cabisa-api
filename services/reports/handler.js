@@ -236,19 +236,25 @@ module.exports.salesProductReport = async event => {
 
     const summaryRows = await db.query(storage.getSalesProductReportSummary(filterFields))
     const topProductRows = await db.query(storage.getTopSoldItem(filterFields, types.productsTypes.PRODUCT))
-    const topServiceRows = await db.query(storage.getTopSoldItem(filterFields, types.productsTypes.SERVICE))
+    const topServiceRows = await db.query(storage.getTopSoldItem(filterFields, types.documentsServiceType.SERVICE))
+    const topEquipmentRows = await db.query(
+      storage.getTopSoldItem(filterFields, types.documentsServiceType.EQUIPMENT)
+    )
     const countResult = await db.query(storage.getSalesProductReportCount(req.query))
 
-    const getSummaryByType = productType =>
-      summaryRows.find(row => row.product_type === productType) || {}
+    const getSummaryByType = itemType =>
+      summaryRows.find(row => row.item_type === itemType) || {}
 
     const summary = {
       top_product: topProductRows[0] || null,
       top_service: topServiceRows[0] || null,
+      top_equipment: topEquipmentRows[0] || null,
       products_total_quantity: getSummaryByType(types.productsTypes.PRODUCT).total_quantity || 0,
-      services_total_quantity: getSummaryByType(types.productsTypes.SERVICE).total_quantity || 0,
+      services_total_quantity: getSummaryByType(types.documentsServiceType.SERVICE).total_quantity || 0,
+      equipment_total_quantity: getSummaryByType(types.documentsServiceType.EQUIPMENT).total_quantity || 0,
       products_total_amount: getSummaryByType(types.productsTypes.PRODUCT).total_amount || 0,
-      services_total_amount: getSummaryByType(types.productsTypes.SERVICE).total_amount || 0,
+      services_total_amount: getSummaryByType(types.documentsServiceType.SERVICE).total_amount || 0,
+      equipment_total_amount: getSummaryByType(types.documentsServiceType.EQUIPMENT).total_amount || 0,
     }
 
     return await handleResponse({
@@ -539,7 +545,8 @@ module.exports.exportReport = async event => {
         req.hasPermissions([types.permissions.REPORTS])
         result = await handleRead(req, { dbQuery: db.query, storage: storage.getSalesProductReport })
         manifestoHeaders = [
-          { name: 'Tipo', column: 'product_type', width: 15 },
+          { name: 'Tipo', column: 'item_type_spanish', width: 15 },
+          { name: 'Categoria', column: 'sales_category_spanish', width: 15 },
           { name: 'Codigo', column: 'code', width: 18 },
           { name: 'Nombre / Descripcion', column: 'description', width: 40 },
           { name: 'Cantidad vendida', column: 'product_quantity', width: 15 },

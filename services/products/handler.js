@@ -9,8 +9,18 @@ module.exports.read = async event => {
     const req = await handleRequest({ event })
 
     const res = await handleRead(req, { dbQuery: db.query, storage: storage.findAllBy, nestedFieldsKeys: ['product_history'] })
+    const countResult = await db.query(storage.findAllByCount(req.query))
 
-    return await handleResponse({ req, res })
+    return await handleResponse({
+      req,
+      res: {
+        statusCode: 200,
+        data: {
+          items: res.data,
+          pagination: { total: countResult[0]?.total || 0 },
+        },
+      },
+    })
   } catch (error) {
     console.log(error)
     return await handleResponse({ error })
@@ -79,11 +89,12 @@ module.exports.create = async event => {
       serial_number: { type: 'string', length: 50 },
       description: { type: 'string', length: 255, required: true },
       image_url: { type: 'string' },
+      sales_category: { type: { enum: types.salesCategories } },
     }
     const req = await handleRequest({ event, inputType })
     req.hasPermissions([types.permissions.INVENTORY])
 
-    const { product_category, status, code, serial_number, tax_id, description, image_url } = req.body
+    const { product_category, status, code, serial_number, tax_id, description, image_url, sales_category } = req.body
     const product_type = types.productsTypes.PRODUCT
     const errors = []
     const requiredFields = ['product_category', 'status', 'code', 'tax_id', 'description']
@@ -105,6 +116,7 @@ module.exports.create = async event => {
       await connection.query(storage.createProduct(), [
         product_type,
         product_category,
+        sales_category || null,
         status,
         code,
         serial_number,
@@ -135,11 +147,12 @@ module.exports.update = async event => {
       tax_id: { type: ['number', 'string'], required: true },
       description: { type: 'string', length: 255, required: true },
       image_url: { type: 'string' },
+      sales_category: { type: { enum: types.salesCategories } },
     }
     const req = await handleRequest({ event, inputType, dbQuery: db.query, storage: storage.findAllBy })
     req.hasPermissions([types.permissions.INVENTORY])
 
-    const { id, product_category, status, code, serial_number, tax_id, description, image_url } = req.body
+    const { id, product_category, status, code, serial_number, tax_id, description, image_url, sales_category } = req.body
     const errors = []
     const requiredFields = ['id', 'product_category', 'status', 'code', 'tax_id', 'description']
     const requiredErrorFields = requiredFields.filter(k => !req.body[k])
@@ -162,6 +175,7 @@ module.exports.update = async event => {
     const res = await db.transaction(async connection => {
       await connection.query(storage.updateProduct(), [
         product_category,
+        sales_category || null,
         status,
         code,
         serial_number,

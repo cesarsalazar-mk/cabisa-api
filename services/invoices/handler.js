@@ -51,13 +51,23 @@ module.exports.read = async event => {
     const req = await handleRequest({ event })
 
     const res = await handleRead(req, { dbQuery: db.query, storage: storage.findAllBy, nestedFieldsKeys: ['products'] })
+    const countResult = await db.query(storage.findAllByCount(req.query))
 
-    const data = res.data.map(invoice => ({
+    const items = res.data.map(invoice => ({
       ...invoice,
-      discount_percentage: invoice.products[0].discount_percentage,
+      discount_percentage: invoice.products[0]?.discount_percentage,
     }))
 
-    return await handleResponse({ req, res: { ...res, data } })
+    return await handleResponse({
+      req,
+      res: {
+        statusCode: 200,
+        data: {
+          items,
+          pagination: { total: countResult[0]?.total || 0 },
+        },
+      },
+    })
   } catch (error) {
     console.log(error)
     return await handleResponse({ error })

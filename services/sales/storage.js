@@ -1,6 +1,46 @@
 const { types, getWhereConditions } = require(`${process.env['FILE_ENVIRONMENT']}/globals`)
 
-const findAllBy = (fields = {}) => `
+const stripPaginationFields = (fields = {}) => {
+  const { $limit, $offset, ...filterFields } = fields
+
+  return filterFields
+}
+
+const buildPaginationSQL = (fields = {}) => {
+  const limit = fields.$limit
+  const offset = fields.$offset
+
+  if (!limit) return ''
+
+  const offsetSQL = offset ? ` OFFSET ${offset}` : ''
+
+  return `LIMIT ${limit}${offsetSQL}`
+}
+
+const getDocumentTypeCondition = (alias = 'd') =>
+  `${alias}.document_type = '${types.documentsTypes.RENT_PRE_INVOICE}'`
+
+const findAllBy = (fields = {}) => {
+  const filterFields = stripPaginationFields(fields)
+  const paginationSQL = buildPaginationSQL(fields)
+  const whereConditions = getWhereConditions({ fields: filterFields, tableAlias: 'd' })
+  const paginationSubquery = paginationSQL
+    ? `
+  AND d.id IN (
+    SELECT id FROM (
+      SELECT d2.id
+      FROM documents d2
+      WHERE ${getDocumentTypeCondition('d2')} ${getWhereConditions({
+        fields: filterFields,
+        tableAlias: 'd2',
+      })}
+      ORDER BY d2.id DESC
+      ${paginationSQL}
+    ) AS paginated_documents
+  )`
+    : ''
+
+  return `
   SELECT
     d.id,
     d.document_type,
@@ -55,14 +95,26 @@ const findAllBy = (fields = {}) => `
   INNER JOIN products prod ON prod.id = dp.product_id
   INNER JOIN stakeholders s ON s.id = d.stakeholder_id
   INNER JOIN projects proj ON proj.id = d.project_id
-  WHERE d.document_type = '${types.documentsTypes.RENT_PRE_INVOICE}' ${getWhereConditions({ fields, tableAlias: 'd' })}
+  WHERE ${getDocumentTypeCondition('d')} ${whereConditions}
+  ${paginationSubquery}
   ORDER BY d.id DESC
-  LIMIT 200
-`
+  `
+}
+
+const findAllByCount = (fields = {}) => {
+  const filterFields = stripPaginationFields(fields)
+
+  return `
+  SELECT COUNT(*) AS total
+  FROM documents d
+  WHERE ${getDocumentTypeCondition('d')} ${getWhereConditions({ fields: filterFields, tableAlias: 'd' })};
+  `
+}
 
 const findSalesStatus = () => `DESCRIBE documents status`
 
 module.exports = {
   findAllBy,
+  findAllByCount,
   findSalesStatus,
 }
