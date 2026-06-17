@@ -534,21 +534,53 @@ return `
 
 const LINE_ITEM_TOTAL = '(dp.product_price + dp.unit_tax_amount - IFNULL(dp.unit_discount_amount, 0)) * dp.product_quantity'
 
+const SALES_ITEM_TYPE_SQL = `
+  CASE
+    WHEN prod.product_type = '${types.productsTypes.SERVICE}' OR dp.service_type = '${types.documentsServiceType.SERVICE}' THEN 'SERVICE'
+    WHEN prod.product_category = '${types.productsCategories.EQUIPMENT}' OR dp.service_type = '${types.documentsServiceType.EQUIPMENT}' THEN 'EQUIPMENT'
+    ELSE 'PRODUCT'
+  END`
+
+const SALES_ITEM_TYPE_SPANISH_SQL = `
+  CASE
+    WHEN prod.product_type = '${types.productsTypes.SERVICE}' OR dp.service_type = '${types.documentsServiceType.SERVICE}' THEN 'Servicio'
+    WHEN prod.product_category = '${types.productsCategories.EQUIPMENT}' OR dp.service_type = '${types.documentsServiceType.EQUIPMENT}' THEN 'Equipo'
+    ELSE 'Producto'
+  END`
+
 const SALES_PRODUCT_REPORT_BASE_FROM = `
     FROM products prod
     INNER JOIN documents_products dp ON prod.id = dp.product_id
     INNER JOIN documents d ON dp.document_id = d.id AND d.status = 'APPROVED'
     WHERE (d.document_type = 'SELL_INVOICE' OR d.document_type = 'RENT_INVOICE')`
 
-const buildSalesProductReportWhere = (fields = {}) => {
-  const rawWhereConditions = getWhereConditions({ fields, tableAlias: 'd' })
+const parseReportFilterFields = (fields = {}) => {
+  const { $limit, $offset, item_type, product_type, ...filterFields } = fields
 
-  return rawWhereConditions
+  return {
+    filterFields,
+    itemType: item_type || product_type,
+  }
+}
+
+const buildItemTypeFilter = itemType => {
+  if (!itemType) return ''
+
+  return ` AND ${SALES_ITEM_TYPE_SQL} = '${itemType}'`
+}
+
+const buildSalesProductReportWhere = (fields = {}, itemType = null) => {
+  const { filterFields, itemType: itemTypeFromFields } = parseReportFilterFields(fields)
+  const resolvedItemType = itemType !== null ? itemType : itemTypeFromFields
+  const rawWhereConditions = getWhereConditions({ fields: filterFields, tableAlias: 'd' })
+
+  return `${rawWhereConditions
     .replace(/d\.code/gi, 'prod.code')
     .replace(/d\.description/gi, 'prod.description')
     .replace(/d\.start_date/gi, 'DATE(d.created_at)')
     .replace(/d\.end_date/gi, 'DATE(d.created_at)')
     .replace(/d\.product_type/gi, 'prod.product_type')
+    .replace(/d\.item_type/gi, SALES_ITEM_TYPE_SQL)}${buildItemTypeFilter(resolvedItemType)}`
 }
 
 const stripPaginationFields = (fields = {}) => {
@@ -577,7 +609,8 @@ const getSalesProductReport = (fields = {}) => {
         prod.id AS id,
         prod.code AS code,
         prod.description AS description,
-        prod.product_type AS product_type,
+        ${SALES_ITEM_TYPE_SQL} AS item_type,
+        ${SALES_ITEM_TYPE_SPANISH_SQL} AS item_type_spanish,
         SUM(dp.product_quantity) AS product_quantity,
         SUM(${LINE_ITEM_TOTAL}) AS total_amount
     ${SALES_PRODUCT_REPORT_BASE_FROM}
@@ -607,17 +640,17 @@ const getSalesProductReportSummary = (fields = {}) => {
 
   return `
   SELECT
-    prod.product_type AS product_type,
+    ${SALES_ITEM_TYPE_SQL} AS item_type,
     SUM(dp.product_quantity) AS total_quantity,
     SUM(${LINE_ITEM_TOTAL}) AS total_amount
   ${SALES_PRODUCT_REPORT_BASE_FROM}
   ${whereConditions}
-  GROUP BY prod.product_type;
+  GROUP BY 1;
   `
 }
 
-const getTopSoldItem = (fields = {}, productType) => {
-  const whereConditions = buildSalesProductReportWhere(fields)
+const getTopSoldItem = (fields = {}, itemType) => {
+  const whereConditions = buildSalesProductReportWhere(fields, itemType)
 
   return `
   SELECT
@@ -626,7 +659,6 @@ const getTopSoldItem = (fields = {}, productType) => {
     SUM(dp.product_quantity) AS product_quantity,
     SUM(${LINE_ITEM_TOTAL}) AS total_amount
   ${SALES_PRODUCT_REPORT_BASE_FROM}
-  AND prod.product_type = '${productType}'
   ${whereConditions}
   GROUP BY prod.id
   ORDER BY product_quantity DESC
