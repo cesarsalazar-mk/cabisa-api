@@ -1,6 +1,27 @@
 const { types, getWhereConditions } = require(`${process.env['FILE_ENVIRONMENT']}/globals`)
 
-const findAllBy = (fields = {}, initWhereCondition = `p.product_type = '${types.productsTypes.SERVICE}'`) => `
+const stripPaginationFields = (fields = {}) => {
+  const { $limit, $offset, ...filterFields } = fields
+
+  return filterFields
+}
+
+const buildPaginationSQL = (fields = {}) => {
+  const limit = fields.$limit
+  const offset = fields.$offset
+
+  if (!limit) return ''
+
+  const offsetSQL = offset ? ` OFFSET ${offset}` : ''
+
+  return `LIMIT ${limit}${offsetSQL}`
+}
+
+const findAllBy = (fields = {}, initWhereCondition = `p.product_type = '${types.productsTypes.SERVICE}'`) => {
+  const filterFields = stripPaginationFields(fields)
+  const paginationSQL = buildPaginationSQL(fields)
+
+  return `
   SELECT
     p.id,
     p.status,
@@ -12,9 +33,21 @@ const findAllBy = (fields = {}, initWhereCondition = `p.product_type = '${types.
     p.updated_at,
     p.updated_by
   FROM products p
-  WHERE ${initWhereCondition} ${getWhereConditions({ fields, tableAlias: 'p' })}
+  WHERE ${initWhereCondition} ${getWhereConditions({ fields: filterFields, tableAlias: 'p' })}
   ORDER BY p.id DESC
-`
+  ${paginationSQL};
+  `
+}
+
+const findAllByCount = (fields = {}, initWhereCondition = `p.product_type = '${types.productsTypes.SERVICE}'`) => {
+  const filterFields = stripPaginationFields(fields)
+
+  return `
+  SELECT COUNT(*) AS total
+  FROM products p
+  WHERE ${initWhereCondition} ${getWhereConditions({ fields: filterFields, tableAlias: 'p' })};
+  `
+}
 
 const findServicesStatus = () => `DESCRIBE products status`
 
@@ -43,6 +76,7 @@ module.exports = {
   createService,
   deleteService,
   findAllBy,
+  findAllByCount,
   findServicesStatus,
   findTaxIdExento,
   updateService,
