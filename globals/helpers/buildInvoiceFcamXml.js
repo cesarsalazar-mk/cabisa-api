@@ -25,7 +25,7 @@ const buildXmlFcam = (data, moment) => {
       <dte:Item BienOServicio="${x.type === "SERVICE" ? "S" : "B" }" NumeroLinea="1">
         <dte:Cantidad>${x.quantity.toFixed(2)}</dte:Cantidad>
         <dte:UnidadMedida>UND</dte:UnidadMedida>
-        <dte:Descripcion>${x.code}|${x.description}</dte:Descripcion>        
+        <dte:Descripcion>${x.code}|${x.description}${data.invoice.observations ? ` - ${data.invoice.observations}` : ''}</dte:Descripcion>
         <dte:PrecioUnitario>${x.price.toFixed(2)}</dte:PrecioUnitario>
         <dte:Precio>${(price_).toFixed(2)}</dte:Precio>
         <dte:Descuento>${x.discount.toFixed(2)}</dte:Descuento>        
@@ -75,7 +75,7 @@ const buildXmlFcam = (data, moment) => {
   let xmlDescription = `
         <dte:Adenda>
           <Codigo_cliente>C01</Codigo_cliente>
-          <Observaciones>${data.invoice.observations ? data.invoice.observations : 'sin observaciones'}</Observaciones>
+          <Observaciones>${'sin observaciones'}</Observaciones>
         </dte:Adenda>
       </dte:SAT>
     </dte:GTDocumento>
