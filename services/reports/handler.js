@@ -89,7 +89,27 @@ module.exports.sales = async event => {
 
     const res = await handleRead(req, { dbQuery: db.query, storage: storage.getSales })
 
-    return await handleResponse({ req, res })
+    const filterFields = storage.stripPaginationFields(req.query)
+    const summaryRows = await db.query(storage.getSalesSummary(filterFields))
+    const countResult = await db.query(storage.getSalesCount(req.query))
+
+    const summaryRow = summaryRows[0] || {}
+    const toNumber = value => Number(value) || 0
+
+    return await handleResponse({
+      req,
+      res: {
+        statusCode: 200,
+        data: {
+          items: res.data,
+          summary: {
+            total_documents: toNumber(summaryRow.total_documents),
+            total_billed: toNumber(summaryRow.total_billed),
+          },
+          pagination: { total: toNumber(countResult[0]?.total) },
+        },
+      },
+    })
   } catch (error) {
     console.log(error)
     return await handleResponse({ error })
@@ -109,12 +129,18 @@ module.exports.inventory = async event => {
       uniqueKey: ['product_id'],
     })
 
-    const resData = res.data.map(product => {
+    const filterFields = storage.stripPaginationFields(req.query)
+    const summaryRows = await db.query(storage.getInventorySummary(filterFields))
+    const countResult = await db.query(storage.getInventoryCount(req.query))
+
+    const mapInventoryProduct = product => {
       const inventoryMovements = product.inventory_movements.reduce((r, im) => {
-        const isDuplicateMovement = r.some(rim => Number(rim.inventory_movement_id) === Number(im.inventory_movement_id))
+        const isDuplicateMovement = r.some(
+          rim => Number(rim.inventory_movement_id) === Number(im.inventory_movement_id)
+        )
 
         if (isDuplicateMovement) return r
-        else return [...r, im]
+        return [...r, im]
       }, [])
 
       const inventoryMovementsWithDetais = inventoryMovements.map(im => {
@@ -128,9 +154,25 @@ module.exports.inventory = async event => {
       delete product.inventory_movements_details
 
       return { ...product, inventory_movements: inventoryMovementsWithDetais }
-    })
+    }
 
-    return await handleResponse({ req, res: { ...res, data: resData } })
+    const summaryRow = summaryRows[0] || {}
+    const toNumber = value => Number(value) || 0
+
+    return await handleResponse({
+      req,
+      res: {
+        statusCode: 200,
+        data: {
+          items: res.data.map(mapInventoryProduct),
+          summary: {
+            total_items: toNumber(summaryRow.total_items),
+            total_value: toNumber(summaryRow.total_value),
+          },
+          pagination: { total: toNumber(countResult[0]?.total) },
+        },
+      },
+    })
   } catch (error) {
     console.log(error)
     return await handleResponse({ error })
@@ -143,73 +185,173 @@ module.exports.getDocumentReport = async (event, context) => {
     const req = await handleRequest({ event })
 
     const res = await handleRead(req, { dbQuery: db.query, storage: storage.getInvoice, nestedFieldsKeys: ['products'] })
-    
-    const data = res.data.map(invoice => ({
+
+    const filterFields = storage.stripPaginationFields(req.query)
+    const summaryRows = await db.query(storage.getInvoiceSummary(filterFields))
+    const countResult = await db.query(storage.getInvoiceCount(req.query))
+
+    const summaryRow = summaryRows[0] || {}
+    const toNumber = value => Number(value) || 0
+
+    const items = res.data.map(invoice => ({
       ...invoice,
-      discount_percentage: invoice.products[0].discount_percentage,
+      discount_percentage: invoice.products[0]?.discount_percentage,
     }))
 
-    return await handleResponse({ req, res: { ...res, data } })
+    return await handleResponse({
+      req,
+      res: {
+        statusCode: 200,
+        data: {
+          items,
+          summary: {
+            total_invoices: toNumber(summaryRow.total_invoices),
+            approved_count: toNumber(summaryRow.approved_count),
+            cancelled_count: toNumber(summaryRow.cancelled_count),
+            approved_total: toNumber(summaryRow.approved_total),
+            cancelled_total: toNumber(summaryRow.cancelled_total),
+          },
+          pagination: { total: toNumber(countResult[0]?.total) },
+        },
+      },
+    })
   } catch (error) {
     console.log(error)
     return await handleResponse({ error })
   }
 }
 
+const mapCashReceiptDocument = d => {
+  const payments =
+    d.payments && d.payments[0]
+      ? d.payments.reduce((r, p) => {
+          const isDuplicate =
+            r[0] && r.some(rp => Number(rp.payment_id) === Number(p.payment_id))
+
+          if (isDuplicate || !p.payment_id || p.is_deleted) return r
+          return [...r, p]
+        }, [])
+      : []
+
+  const due = payments
+    .filter(item => item.is_deleted === 0)
+    .reduce((sum, { payment_amount }) => sum + payment_amount, 0)
+
+  const products =
+    d.products && d.products[0]
+      ? d.products.reduce((r, p) => {
+          const isDuplicate =
+            r[0] &&
+            r.some(
+              rp =>
+                Number(rp.id) === Number(p.id) &&
+                Number(rp.parent_product_id) === Number(p.parent_product_id)
+            )
+
+          if (isDuplicate) return r
+          return [...r, p]
+        }, [])
+      : []
+
+  return {
+    ...d,
+    discount_percentage: d.products[0]?.discount_percentage,
+    due,
+    products,
+    payments,
+  }
+}
+
+const buildReceiptsSummary = summaryRow => {
+  const toNumber = value => Number(value) || 0
+  const totalBilled = toNumber(summaryRow.total_billed)
+  const totalPaid = toNumber(summaryRow.total_paid)
+  const electronicBilled = toNumber(summaryRow.electronic_billed)
+  const electronicPaid = toNumber(summaryRow.electronic_paid)
+  const systemBilled = toNumber(summaryRow.system_billed)
+  const systemPaid = toNumber(summaryRow.system_paid)
+
+  return {
+    total_invoices: toNumber(summaryRow.total_invoices),
+    total_billed: totalBilled,
+    total_paid: totalPaid,
+    total_balance: totalBilled - totalPaid,
+    electronic: {
+      count: toNumber(summaryRow.electronic_count),
+      billed: electronicBilled,
+      paid: electronicPaid,
+      balance: electronicBilled - electronicPaid,
+    },
+    system: {
+      count: toNumber(summaryRow.system_count),
+      billed: systemBilled,
+      paid: systemPaid,
+      balance: systemBilled - systemPaid,
+    },
+  }
+}
+
 module.exports.getCashReceipts = async (event, context) => {    
   try {
     const req = await handleRequest({ event })
-    console.log(req)
-    console.log(req.query.document_number)
-    
-    let systemInvoice =  req.queryStringParameters.document_number ? (req.queryStringParameters.document_number.toLowerCase() === '$like:%factura del sistema%') : false
 
-    if(systemInvoice){
+    const { systemInvoice } = storage.parseReceiptsFilterFields(req.query)
+
+    if (systemInvoice) {
       delete req.query.document_number
     }
 
-    const res = await handleRead(req, { dbQuery: db.query, storage: storage.getReceipts, nestedFieldsKeys: ['products', 'payments'] })
-    console.log(res.data[0])
-    let data = res.data[0]
-      ? res.data.map(d => ({
-          ...d,
-          discount_percentage: d.products[0].discount_percentage,          
-          due: d.payments && d.payments[0] ? d.payments.reduce((r, p) => {
-            const isDuplicate = r[0] && r.some(rp => Number(rp.payment_id) === Number(p.payment_id))
+    const res = await handleRead(req, {
+      dbQuery: db.query,
+      storage: storage.getReceipts,
+      nestedFieldsKeys: ['products', 'payments'],
+    })
 
-            if (isDuplicate || !p.payment_id || p.is_deleted) return r
-            else return [...r, p]
-          }, []).filter(item => item.is_deleted === 0).reduce((sum ,{payment_amount}) => sum + payment_amount , 0) : 0,
-          products:
-            d.products && d.products[0]
-              ? d.products.reduce((r, p) => {
-                  const isDuplicate =
-                    r[0] && r.some(rp => Number(rp.id) === Number(p.id) && Number(rp.parent_product_id) === Number(p.parent_product_id))
+    const filterFields = storage.stripPaginationFields(req.query)
+    const summaryRows = await db.query(storage.getReceiptsSummary(filterFields))
+    const countResult = await db.query(storage.getReceiptsCount(req.query))
 
-                  if (isDuplicate) return r
-                  else return [...r, p]
-                }, [])
-              : [],
-          payments:
-            d.payments && d.payments[0]
-              ? d.payments.reduce((r, p) => {
-                  const isDuplicate = r[0] && r.some(rp => Number(rp.payment_id) === Number(p.payment_id))
+    const items = res.data[0] ? res.data.map(mapCashReceiptDocument) : []
+    const toNumber = value => Number(value) || 0
 
-                  if (isDuplicate || !p.payment_id || p.is_deleted) return r
-                  else return [...r, p]
-                }, [])
-              : [],
-        }))
-      : []        
-      
-      if(systemInvoice){
-        data = data.filter(item => item.document_number === null)
-      }
-
-    return await handleResponse({ req, res: { ...res, data } })
+    return await handleResponse({
+      req,
+      res: {
+        statusCode: 200,
+        data: {
+          items,
+          summary: buildReceiptsSummary(summaryRows[0] || {}),
+          pagination: { total: toNumber(countResult[0]?.total) },
+        },
+      },
+    })
   } catch (error) {
     console.log(error)
     return await handleResponse({ error })
+  }
+}
+
+const mapManualReceiptDocument = d => {
+  const payments =
+    d.payments && d.payments[0]
+      ? d.payments.reduce((r, p) => {
+          const isDuplicate =
+            r[0] && r.some(rp => Number(rp.payment_id) === Number(p.payment_id))
+
+          if (isDuplicate || !p.payment_id || p.is_deleted) return r
+          return [...r, p]
+        }, [])
+      : []
+
+  const due = payments
+    .filter(item => item.is_deleted === 0)
+    .reduce((sum, { payment_amount }) => sum + payment_amount, 0)
+
+  return {
+    ...d,
+    due,
+    payments,
+    differenceAmount: d.total_amount - due,
   }
 }
 
@@ -217,34 +359,39 @@ module.exports.getCashManualReceipts = async (event, context) => {
   try {
     const req = await handleRequest({ event })
 
-    const res = await handleRead(req, { dbQuery: db.query, storage: storage.getManualReceipts, nestedFieldsKeys: ['payments'] })
-      
-    const data = res.data[0]
-      ? res.data.map(d => {        
-        let composeData = {
-          ...d,
-          due: d.payments && d.payments[0] ? d.payments.reduce((r, p) => {
-            const isDuplicate = r[0] && r.some(rp => Number(rp.payment_id) === Number(p.payment_id))
+    const res = await handleRead(req, {
+      dbQuery: db.query,
+      storage: storage.getManualReceipts,
+      nestedFieldsKeys: ['payments'],
+    })
 
-            if (isDuplicate || !p.payment_id || p.is_deleted) return r
-            else return [...r, p]
-          }, []).filter(item => item.is_deleted === 0).reduce((sum ,{payment_amount}) => sum + payment_amount , 0) : 0,
-          payments:
-            d.payments && d.payments[0]
-              ? d.payments.reduce((r, p) => {
-                  const isDuplicate = r[0] && r.some(rp => Number(rp.payment_id) === Number(p.payment_id))
+    const filterFields = storage.stripPaginationFields(req.query)
+    const summaryRows = await db.query(storage.getManualReceiptsSummary(filterFields))
+    const countResult = await db.query(storage.getManualReceiptsCount(req.query))
 
-                  if (isDuplicate || !p.payment_id || p.is_deleted) return r
-                  else return [...r, p]
-                }, [])
-              : [],
-        }
-        composeData.differenceAmount = composeData.total_amount - composeData.due          
-        return composeData
-      })
-      : []
+    const summaryRow = summaryRows[0] || {}
+    const toNumber = value => Number(value) || 0
+    const totalBilled = toNumber(summaryRow.total_billed)
+    const totalPaid = toNumber(summaryRow.total_paid)
 
-    return await handleResponse({ req, res: { ...res, data } })
+    const items = res.data[0] ? res.data.map(mapManualReceiptDocument) : []
+
+    return await handleResponse({
+      req,
+      res: {
+        statusCode: 200,
+        data: {
+          items,
+          summary: {
+            total_receipts: toNumber(summaryRow.total_receipts),
+            total_billed: totalBilled,
+            total_paid: totalPaid,
+            total_balance: totalBilled - totalPaid,
+          },
+          pagination: { total: toNumber(countResult[0]?.total) },
+        },
+      },
+    })
   } catch (error) {
     console.log(error)
     return await handleResponse({ error })
@@ -255,8 +402,36 @@ module.exports.getServiceOrders = async event => {
   try {
     const req = await handleRequest({ event })
     req.hasPermissions([types.permissions.REPORTS])
-    const res = await handleRead(req, { dbQuery: db.query, storage: storage.getServiceOrders, nestedFieldsKeys: ['products'] })
-    return await handleResponse({ req, res })
+
+    const res = await handleRead(req, {
+      dbQuery: db.query,
+      storage: storage.getServiceOrders,
+      nestedFieldsKeys: ['products'],
+    })
+
+    const filterFields = storage.stripPaginationFields(req.query)
+    const summaryRows = await db.query(storage.getServiceOrdersSummary(filterFields))
+    const countResult = await db.query(storage.getServiceOrdersCount(req.query))
+
+    const summaryRow = summaryRows[0] || {}
+    const toNumber = value => Number(value) || 0
+
+    return await handleResponse({
+      req,
+      res: {
+        statusCode: 200,
+        data: {
+          items: res.data,
+          summary: {
+            total_orders: toNumber(summaryRow.total_orders),
+            approved_count: toNumber(summaryRow.approved_count),
+            pending_count: toNumber(summaryRow.pending_count),
+            cancelled_count: toNumber(summaryRow.cancelled_count),
+          },
+          pagination: { total: toNumber(countResult[0]?.total) },
+        },
+      },
+    })
   } catch (error) {
     console.log(error)
     return await handleResponse({ error })

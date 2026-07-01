@@ -198,39 +198,84 @@ const getAccountsReceivable = (fields = {}) => {
   `
 }
 
-const getSales = (fields = {}) => {
-  const rawWhereConditions = getWhereConditions({ fields, tableAlias: 'd' })
-  const includeInvoices = /d.document_type = 'INVOICES'/i.test(rawWhereConditions)
-  const includePreInvoices = /d.document_type = 'PRE_INVOICE'/i.test(rawWhereConditions)
+const buildSalesReportQueryParts = (
+  fields = {},
+  { docAlias = 'd', stakeholderAlias = 's', userAlias = 'u' } = {}
+) => {
+  const filterFields = stripPaginationFields(fields)
+  const rawWhereConditions = getWhereConditions({ fields: filterFields, tableAlias: docAlias })
+  const includeInvoices = new RegExp(`${docAlias}\\.document_type = 'INVOICES'`, 'i').test(
+    rawWhereConditions
+  )
+  const includePreInvoices = new RegExp(`${docAlias}\\.document_type = 'PRE_INVOICE'`, 'i').test(
+    rawWhereConditions
+  )
   const includeBoth = !includeInvoices && !includePreInvoices
+
   const whereConditions = rawWhereConditions
-    .replace(/d.client_id/i, 's.id')
-    .replace(/AND d.document_type = 'INVOICES'/i, '')
-    .replace(/AND d.document_type = 'PRE_INVOICE'/i, '')
-    .replace(/start_date/i, 'created_at')
-    .replace(/end_date/i, 'created_at')
-    .replace(/d.seller_id/i, 'u.id')
+    .replace(new RegExp(`${docAlias}\\.client_id`, 'gi'), `${stakeholderAlias}.id`)
+    .replace(new RegExp(`AND ${docAlias}\\.document_type = 'INVOICES'`, 'gi'), '')
+    .replace(new RegExp(`AND ${docAlias}\\.document_type = 'PRE_INVOICE'`, 'gi'), '')
+    .replace(/start_date/gi, 'created_at')
+    .replace(/end_date/gi, 'created_at')
+    .replace(new RegExp(`${docAlias}\\.seller_id`, 'gi'), `${userAlias}.id`)
 
   const invoicesWhereConditions =
     includeInvoices || includeBoth
       ? `(
-      d.document_type = '${types.documentsTypes.SELL_INVOICE}' OR      
-      d.document_type = '${types.documentsTypes.RENT_INVOICE}'
+      ${docAlias}.document_type = '${types.documentsTypes.SELL_INVOICE}' OR
+      ${docAlias}.document_type = '${types.documentsTypes.RENT_INVOICE}'
     )`
       : ''
 
   const preInvoicesWhereConditions =
     includePreInvoices || includeBoth
-      ? `(d.document_type = '${types.documentsTypes.RENT_PRE_INVOICE}' AND d.related_internal_document_id IS NULL)`
+      ? `(${docAlias}.document_type = '${types.documentsTypes.RENT_PRE_INVOICE}' AND ${docAlias}.related_internal_document_id IS NULL)`
       : ''
 
-  const documentTypeWhereOperator = (includeInvoices && includePreInvoices) || includeBoth ? 'OR' : ''
+  const documentTypeWhereOperator =
+    (includeInvoices && includePreInvoices) || includeBoth ? 'OR' : ''
+
+  const documentTypeWhere = `${includeBoth ? '(' : ''}
+        ${invoicesWhereConditions} ${documentTypeWhereOperator} ${preInvoicesWhereConditions}
+      ${includeBoth ? ')' : ''}`
+
+  return { documentTypeWhere, whereConditions }
+}
+
+const buildSalesReportWhereSql = (fields = {}, aliases = {}) => {
+  const { documentTypeWhere, whereConditions } = buildSalesReportQueryParts(fields, aliases)
+  const { docAlias = 'd' } = aliases
+
+  return `
+    ${documentTypeWhere} AND
+    ${docAlias}.status = '${types.documentsStatus.APPROVED}'
+    ${whereConditions}
+  `
+}
+
+const getSales = (fields = {}) => {
+  const paginationSQL = buildPaginationSQL(fields)
+  const paginationSubquery = paginationSQL
+    ? `
+    AND d.id IN (
+      SELECT id FROM (
+        SELECT d2.id
+        FROM documents d2
+        LEFT JOIN stakeholders s2 ON s2.id = d2.stakeholder_id
+        LEFT JOIN users u2 ON u2.id = d2.created_by
+        WHERE ${buildSalesReportWhereSql(fields, { docAlias: 'd2', stakeholderAlias: 's2', userAlias: 'u2' })}
+        ORDER BY d2.id DESC
+        ${paginationSQL}
+      ) AS paginated_sales
+    )`
+    : ''
 
   return `
     SELECT
       d.id,
       d.dispatched_by,
-      d.received_by,      
+      d.received_by,
       d.related_internal_document_id,
       d.credit_status,
       CASE
@@ -245,7 +290,7 @@ const getSales = (fields = {}) => {
       d.document_type,
       CASE
         WHEN d.document_type = 'SELL_INVOICE' THEN 'Factura manual'
-        WHEN d.document_type = 'RENT_INVOICE' THEN 'Nota de servicio'        
+        WHEN d.document_type = 'RENT_INVOICE' THEN 'Nota de servicio'
         ELSE 'NO DISPONIBLE' END as document_type_spanish,
       d.stakeholder_id,
       s.stakeholder_type,
@@ -274,23 +319,66 @@ const getSales = (fields = {}) => {
     FROM documents d
     LEFT JOIN stakeholders s ON s.id = d.stakeholder_id
     LEFT JOIN users u ON u.id = d.created_by
-    WHERE ${includeBoth ? '(' : ''}
-        ${invoicesWhereConditions} ${documentTypeWhereOperator} ${preInvoicesWhereConditions}
-      ${includeBoth ? ')' : ''} AND
-      d.status = '${types.documentsStatus.APPROVED}'
-      ${whereConditions}
+    WHERE ${buildSalesReportWhereSql(fields)}
+    ${paginationSubquery}
     ORDER BY d.id DESC
   `
 }
 
-const getInventory = (fields = {}) => {
-  const rawWhereConditions = getWhereConditions({ fields, tableAlias: 'p' })
-  const whereConditions = rawWhereConditions.replace(/p.start_date/i, 'imd.created_at').replace(/p.end_date/i, 'imd.created_at').replace(/p.product_id/i, 'p.id')
+const getSalesCount = (fields = {}) => `
+  SELECT COUNT(*) AS total
+  FROM documents d
+  LEFT JOIN stakeholders s ON s.id = d.stakeholder_id
+  LEFT JOIN users u ON u.id = d.created_by
+  WHERE ${buildSalesReportWhereSql(stripPaginationFields(fields))};
+`
 
-  // Las siguientes dos lineas se agregaron a la query asumiendo que no existen movimientos parciales de inventario
-  // De llegar a existir se debe presentar la informacion de otra manera
-  //    imd.created_at AS inventory_movements__created_at,
-  //    u.full_name AS inventory_movements__creator_name,
+const getSalesSummary = (fields = {}) => `
+  SELECT
+    COUNT(*) AS total_documents,
+    COALESCE(SUM(d.total_amount), 0) AS total_billed
+  FROM documents d
+  LEFT JOIN stakeholders s ON s.id = d.stakeholder_id
+  LEFT JOIN users u ON u.id = d.created_by
+  WHERE ${buildSalesReportWhereSql(stripPaginationFields(fields))};
+`
+
+const buildInventoryWhere = (fields = {}, productAlias = 'p') => {
+  const filterFields = stripPaginationFields(fields)
+  const rawWhereConditions = getWhereConditions({ fields: filterFields, tableAlias: productAlias })
+
+  return rawWhereConditions
+    .replace(new RegExp(`${productAlias}\\.start_date`, 'gi'), 'imd.created_at')
+    .replace(new RegExp(`${productAlias}\\.end_date`, 'gi'), 'imd.created_at')
+    .replace(new RegExp(`${productAlias}\\.product_id`, 'gi'), `${productAlias}.id`)
+}
+
+const buildInventoryDistinctProductsSubquery = (fields = {}, { withPagination = false } = {}) => {
+  const whereConditions = buildInventoryWhere(stripPaginationFields(fields), 'p2')
+  const paginationSQL = withPagination ? buildPaginationSQL(fields) : ''
+
+  return `
+    SELECT id FROM (
+      SELECT DISTINCT p2.id
+      FROM products p2
+      LEFT JOIN inventory_movements im ON im.product_id = p2.id
+      LEFT JOIN inventory_movements_details imd ON imd.inventory_movement_id = im.id
+      WHERE im.status = '${types.inventoryMovementsStatus.APPROVED}'
+      ${whereConditions}
+      ORDER BY p2.id
+      ${paginationSQL}
+    ) AS paginated_products
+  `
+}
+
+const getInventory = (fields = {}) => {
+  const whereConditions = buildInventoryWhere(fields, 'p')
+  const paginationSQL = buildPaginationSQL(fields)
+  const paginationSubquery = paginationSQL
+    ? `
+      AND p.id IN (${buildInventoryDistinctProductsSubquery(fields, { withPagination: true })})
+    `
+    : ''
 
   return `
       SELECT
@@ -335,16 +423,72 @@ const getInventory = (fields = {}) => {
       LEFT JOIN operations o ON o.id = im.operation_id
       LEFT JOIN inventory_movements_details imd ON imd.inventory_movement_id = im.id
       LEFT JOIN users u ON u.id = imd.created_by
-      WHERE (        
+      WHERE (
         im.status = '${types.inventoryMovementsStatus.APPROVED}'
       ) ${whereConditions}
+      ${paginationSubquery}
       ORDER BY im.operation_id, im.id
     `
 }
 
+const getInventoryCount = (fields = {}) => `
+  SELECT COUNT(*) AS total
+  FROM (
+    SELECT DISTINCT p.id
+    FROM products p
+    LEFT JOIN inventory_movements im ON im.product_id = p.id
+    LEFT JOIN inventory_movements_details imd ON imd.inventory_movement_id = im.id
+    WHERE im.status = '${types.inventoryMovementsStatus.APPROVED}'
+    ${buildInventoryWhere(stripPaginationFields(fields), 'p')}
+  ) AS counted_products;
+`
+
+const getInventorySummary = (fields = {}) => `
+  SELECT
+    COALESCE(SUM(p.stock), 0) AS total_items,
+    COALESCE(SUM(p.inventory_total_value), 0) AS total_value
+  FROM products p
+  WHERE p.id IN (
+    SELECT DISTINCT p2.id
+    FROM products p2
+    LEFT JOIN inventory_movements im ON im.product_id = p2.id
+    LEFT JOIN inventory_movements_details imd ON imd.inventory_movement_id = im.id
+    WHERE im.status = '${types.inventoryMovementsStatus.APPROVED}'
+    ${buildInventoryWhere(stripPaginationFields(fields), 'p2')}
+  );
+`
+
+const getInvoiceTypeCondition = (alias = 'd') =>
+  `(${alias}.document_type = '${types.documentsTypes.SELL_INVOICE}' OR ${alias}.document_type = '${types.documentsTypes.RENT_INVOICE}')`
+
+const buildInvoiceReportWhere = (fields = {}, docAlias = 'd', stakeholderAlias = 's') => {
+  const filterFields = stripPaginationFields(fields)
+  const rawWhereConditions = getWhereConditions({ fields: filterFields, tableAlias: docAlias })
+
+  return rawWhereConditions
+    .replace(new RegExp(`${docAlias}\\.nit`, 'gi'), `${stakeholderAlias}.nit`)
+    .replace(new RegExp(`${docAlias}\\.name`, 'gi'), `${stakeholderAlias}.name`)
+    .replace(new RegExp(`${docAlias}\\.start_date`, 'gi'), `DATE(${docAlias}.created_at)`)
+    .replace(new RegExp(`${docAlias}\\.end_date`, 'gi'), `DATE(${docAlias}.created_at)`)
+}
+
 const getInvoice = (fields = {}) => {
-  const rawWhereConditions = getWhereConditions({ fields, tableAlias: 'd' })  
-  const whereConditions = rawWhereConditions.replace(/d.nit/i, 's.nit').replace(/d.name/i, 's.name').replace(/d.start_date/i, 'DATE(d.created_at)').replace(/d.end_date/i, 'DATE(d.created_at)')
+  const whereConditions = buildInvoiceReportWhere(fields)
+  const paginationSQL = buildPaginationSQL(fields)
+  const paginationSubquery = paginationSQL
+    ? `
+    AND d.id IN (
+      SELECT id FROM (
+        SELECT d2.id
+        FROM documents d2
+        LEFT JOIN stakeholders s2 ON s2.id = d2.stakeholder_id
+        WHERE ${getInvoiceTypeCondition('d2')} ${buildInvoiceReportWhere(fields, 'd2', 's2')}
+        ORDER BY d2.id DESC
+        ${paginationSQL}
+      ) AS paginated_documents
+    )`
+    : ''
+
   return `
     SELECT
       d.id,
@@ -408,17 +552,80 @@ const getInvoice = (fields = {}) => {
     LEFT JOIN stakeholders s ON s.id = d.stakeholder_id
     LEFT JOIN documents_products dp ON dp.document_id = d.id
     LEFT JOIN products prod ON prod.id = dp.product_id
-    WHERE (
-      d.document_type = '${types.documentsTypes.SELL_INVOICE}' OR
-      d.document_type = '${types.documentsTypes.RENT_INVOICE}'
-    ) ${whereConditions}
+    WHERE ${getInvoiceTypeCondition('d')} ${whereConditions}
+    ${paginationSubquery}
     ORDER BY d.id DESC
   `
 }
 
+const getInvoiceCount = (fields = {}) => `
+  SELECT COUNT(*) AS total
+  FROM documents d
+  LEFT JOIN stakeholders s ON s.id = d.stakeholder_id
+  WHERE ${getInvoiceTypeCondition('d')} ${buildInvoiceReportWhere(stripPaginationFields(fields))};
+`
+
+const getInvoiceSummary = (fields = {}) => `
+  SELECT
+    COUNT(*) AS total_invoices,
+    COALESCE(SUM(CASE WHEN d.status = 'APPROVED' THEN 1 ELSE 0 END), 0) AS approved_count,
+    COALESCE(SUM(CASE WHEN d.status = 'CANCELLED' THEN 1 ELSE 0 END), 0) AS cancelled_count,
+    COALESCE(SUM(CASE WHEN d.status = 'APPROVED' THEN d.total_amount ELSE 0 END), 0) AS approved_total,
+    COALESCE(SUM(CASE WHEN d.status = 'CANCELLED' THEN d.total_amount ELSE 0 END), 0) AS cancelled_total
+  FROM documents d
+  LEFT JOIN stakeholders s ON s.id = d.stakeholder_id
+  WHERE ${getInvoiceTypeCondition('d')} ${buildInvoiceReportWhere(stripPaginationFields(fields))};
+`
+
+const parseReceiptsFilterFields = (fields = {}) => {
+  const filterFields = stripPaginationFields(fields)
+  const documentNumberFilter = filterFields.document_number
+  const systemInvoice =
+    documentNumberFilter &&
+    String(documentNumberFilter.$like || '')
+      .toLowerCase()
+      .includes('factura del sistema')
+
+  if (systemInvoice) {
+    delete filterFields.document_number
+  }
+
+  return { filterFields, systemInvoice }
+}
+
+const buildReceiptsReportWhere = (fields = {}, docAlias = 'd', stakeholderAlias = 's') => {
+  const { filterFields, systemInvoice } = parseReceiptsFilterFields(fields)
+  const rawWhereConditions = getWhereConditions({ fields: filterFields, tableAlias: docAlias })
+
+  const whereConditions = rawWhereConditions
+    .replace(new RegExp(`${docAlias}\\.nit`, 'gi'), `${stakeholderAlias}.nit`)
+    .replace(new RegExp(`${docAlias}\\.name`, 'gi'), `${stakeholderAlias}.name`)
+    .replace(new RegExp(`${docAlias}\\.start_date`, 'gi'), `DATE(${docAlias}.created_at)`)
+    .replace(new RegExp(`${docAlias}\\.end_date`, 'gi'), `DATE(${docAlias}.created_at)`)
+
+  return systemInvoice
+    ? `${whereConditions} AND ${docAlias}.document_number IS NULL`
+    : whereConditions
+}
+
 const getReceipts = (fields = {}) => {
-  const rawWhereConditions = getWhereConditions({ fields, tableAlias: 'd' })
-  const whereConditions = rawWhereConditions.replace(/d.nit/i, 's.nit').replace(/d.name/i, 's.name').replace(/d.start_date/i, 'DATE(d.created_at)').replace(/d.end_date/i, 'DATE(d.created_at)')
+  const whereConditions = buildReceiptsReportWhere(fields)
+  const paginationSQL = buildPaginationSQL(fields)
+  const paginationSubquery = paginationSQL
+    ? `
+    AND d.id IN (
+      SELECT id FROM (
+        SELECT d2.id
+        FROM documents d2
+        LEFT JOIN stakeholders s2 ON s2.id = d2.stakeholder_id
+        WHERE ${getInvoiceTypeCondition('d2')}
+        AND d2.status = 'APPROVED'
+        ${buildReceiptsReportWhere(fields, 'd2', 's2')}
+        ORDER BY d2.id DESC
+        ${paginationSQL}
+      ) AS paginated_documents
+    )`
+    : ''
 
   return `
     SELECT
@@ -510,18 +717,80 @@ const getReceipts = (fields = {}) => {
     LEFT JOIN documents_products dp ON dp.document_id = d.id
     LEFT JOIN products prod ON prod.id = dp.product_id
     LEFT JOIN payments pay ON pay.document_id = d.id
-    WHERE (
-      d.document_type = '${types.documentsTypes.SELL_INVOICE}' OR
-      d.document_type = '${types.documentsTypes.RENT_INVOICE}'
-    ) ${whereConditions}
+    WHERE ${getInvoiceTypeCondition('d')}
+    ${whereConditions}
     AND d.status = 'APPROVED'
+    ${paginationSubquery}
     ORDER BY d.id DESC
   `
 }
 
+const getReceiptsCount = (fields = {}) => `
+  SELECT COUNT(*) AS total
+  FROM documents d
+  LEFT JOIN stakeholders s ON s.id = d.stakeholder_id
+  WHERE ${getInvoiceTypeCondition('d')}
+  AND d.status = 'APPROVED'
+  ${buildReceiptsReportWhere(stripPaginationFields(fields))};
+`
+
+const getReceiptsSummary = (fields = {}) => `
+  SELECT
+    COUNT(*) AS total_invoices,
+    COALESCE(SUM(total_amount), 0) AS total_billed,
+    COALESCE(SUM(paid_amount), 0) AS total_paid,
+    COALESCE(SUM(CASE WHEN document_number IS NOT NULL THEN 1 ELSE 0 END), 0) AS electronic_count,
+    COALESCE(SUM(CASE WHEN document_number IS NULL THEN 1 ELSE 0 END), 0) AS system_count,
+    COALESCE(SUM(CASE WHEN document_number IS NOT NULL THEN total_amount ELSE 0 END), 0) AS electronic_billed,
+    COALESCE(SUM(CASE WHEN document_number IS NULL THEN total_amount ELSE 0 END), 0) AS system_billed,
+    COALESCE(SUM(CASE WHEN document_number IS NOT NULL THEN paid_amount ELSE 0 END), 0) AS electronic_paid,
+    COALESCE(SUM(CASE WHEN document_number IS NULL THEN paid_amount ELSE 0 END), 0) AS system_paid
+  FROM (
+    SELECT
+      d.id,
+      d.document_number,
+      d.total_amount,
+      COALESCE((
+        SELECT SUM(p.payment_amount)
+        FROM payments p
+        WHERE p.document_id = d.id AND (p.is_deleted = 0 OR p.is_deleted IS NULL)
+      ), 0) AS paid_amount
+    FROM documents d
+    LEFT JOIN stakeholders s ON s.id = d.stakeholder_id
+    WHERE ${getInvoiceTypeCondition('d')}
+    AND d.status = 'APPROVED'
+    ${buildReceiptsReportWhere(stripPaginationFields(fields))}
+  ) AS receipt_totals;
+`
+
+const buildManualReceiptsReportWhere = (fields = {}, docAlias = 'd', stakeholderAlias = 's') => {
+  const filterFields = stripPaginationFields(fields)
+  const rawWhereConditions = getWhereConditions({ fields: filterFields, tableAlias: docAlias })
+
+  return rawWhereConditions
+    .replace(new RegExp(`${docAlias}\\.nit`, 'gi'), `${stakeholderAlias}.nit`)
+    .replace(new RegExp(`${docAlias}\\.name`, 'gi'), `${stakeholderAlias}.name`)
+    .replace(new RegExp(`${docAlias}\\.start_date`, 'gi'), `DATE(${docAlias}.created_at)`)
+    .replace(new RegExp(`${docAlias}\\.end_date`, 'gi'), `DATE(${docAlias}.created_at)`)
+}
+
 const getManualReceipts = (fields = {}) => {
-  const rawWhereConditions = getWhereConditions({ fields, tableAlias: 'd' })
-  const whereConditions = rawWhereConditions.replace(/d.nit/i, 's.nit').replace(/d.name/i, 's.name').replace(/d.start_date/i, 'DATE(d.created_at)').replace(/d.end_date/i, 'DATE(d.created_at)')
+  const whereConditions = buildManualReceiptsReportWhere(fields)
+  const paginationSQL = buildPaginationSQL(fields)
+  const paginationSubquery = paginationSQL
+    ? `
+    AND d.id IN (
+      SELECT id FROM (
+        SELECT d2.id
+        FROM manual_payments d2
+        LEFT JOIN stakeholders s2 ON d2.stakeholder_id = s2.id
+        WHERE 1 = 1
+        ${buildManualReceiptsReportWhere(fields, 'd2', 's2')}
+        ORDER BY d2.id DESC
+        ${paginationSQL}
+      ) AS paginated_manual_payments
+    )`
+    : ''
 
   return `
   SELECT
@@ -558,16 +827,70 @@ FROM manual_payments d
 LEFT JOIN manual_payments_detail paydetail on d.id = paydetail.manual_payment
 LEFT JOIN projects proj ON d.project_id = proj.id
 LEFT JOIN stakeholders s ON d.stakeholder_id = s.id
-    WHERE 1 = 1      
+    WHERE 1 = 1
     ${whereConditions}
+    ${paginationSubquery}
     ORDER BY d.id DESC
   `
 }
 
+const getManualReceiptsCount = (fields = {}) => `
+  SELECT COUNT(*) AS total
+  FROM manual_payments d
+  LEFT JOIN stakeholders s ON d.stakeholder_id = s.id
+  WHERE 1 = 1
+  ${buildManualReceiptsReportWhere(stripPaginationFields(fields))};
+`
+
+const getManualReceiptsSummary = (fields = {}) => `
+  SELECT
+    COUNT(*) AS total_receipts,
+    COALESCE(SUM(total_amount), 0) AS total_billed,
+    COALESCE(SUM(paid_amount), 0) AS total_paid
+  FROM (
+    SELECT
+      d.id,
+      d.total_amount,
+      COALESCE((
+        SELECT SUM(pd.payment_amount)
+        FROM manual_payments_detail pd
+        WHERE pd.manual_payment = d.id AND (pd.is_deleted = 0 OR pd.is_deleted IS NULL)
+      ), 0) AS paid_amount
+    FROM manual_payments d
+    LEFT JOIN stakeholders s ON d.stakeholder_id = s.id
+    WHERE 1 = 1
+    ${buildManualReceiptsReportWhere(stripPaginationFields(fields))}
+  ) AS manual_receipt_totals;
+`
+
+const buildServiceOrdersReportWhere = (fields = {}, docAlias = 'd', stakeholderAlias = 's') => {
+  const filterFields = stripPaginationFields(fields)
+  const rawWhereConditions = getWhereConditions({ fields: filterFields, tableAlias: docAlias })
+
+  return rawWhereConditions
+    .replace(new RegExp(`${docAlias}\\.name`, 'gi'), `${stakeholderAlias}.name`)
+    .replace(new RegExp(`${docAlias}\\.start_date`, 'gi'), `DATE(${docAlias}.start_date)`)
+}
+
 const getServiceOrders = (fields = {}) => {
-const rawWhereConditions = getWhereConditions({ fields, tableAlias: 'd' })
-const whereConditions = rawWhereConditions.replace(/d.name/i, 's.name').replace(/d.start_date/i, 'DATE(d.start_date)')
-return `
+  const whereConditions = buildServiceOrdersReportWhere(fields)
+  const paginationSQL = buildPaginationSQL(fields)
+  const paginationSubquery = paginationSQL
+    ? `
+    AND d.id IN (
+      SELECT id FROM (
+        SELECT d2.id
+        FROM documents d2
+        INNER JOIN stakeholders s2 ON s2.id = d2.stakeholder_id
+        WHERE d2.document_type = '${types.documentsTypes.RENT_PRE_INVOICE}'
+        ${buildServiceOrdersReportWhere(fields, 'd2', 's2')}
+        ORDER BY d2.id DESC
+        ${paginationSQL}
+      ) AS paginated_service_orders
+    )`
+    : ''
+
+  return `
   SELECT
     d.id,
     d.document_type,
@@ -635,12 +958,32 @@ return `
   INNER JOIN products prod ON prod.id = dp.product_id
   INNER JOIN stakeholders s ON s.id = d.stakeholder_id
   INNER JOIN projects proj ON proj.id = d.project_id
-  WHERE d.document_type = '${types.documentsTypes.RENT_PRE_INVOICE}' 
+  WHERE d.document_type = '${types.documentsTypes.RENT_PRE_INVOICE}'
   ${whereConditions}
+  ${paginationSubquery}
   ORDER BY d.id DESC
-  LIMIT 200
-`
+  `
 }
+
+const getServiceOrdersCount = (fields = {}) => `
+  SELECT COUNT(*) AS total
+  FROM documents d
+  INNER JOIN stakeholders s ON s.id = d.stakeholder_id
+  WHERE d.document_type = '${types.documentsTypes.RENT_PRE_INVOICE}'
+  ${buildServiceOrdersReportWhere(stripPaginationFields(fields))};
+`
+
+const getServiceOrdersSummary = (fields = {}) => `
+  SELECT
+    COUNT(*) AS total_orders,
+    COALESCE(SUM(CASE WHEN d.status = 'APPROVED' THEN 1 ELSE 0 END), 0) AS approved_count,
+    COALESCE(SUM(CASE WHEN d.status = 'PENDING' THEN 1 ELSE 0 END), 0) AS pending_count,
+    COALESCE(SUM(CASE WHEN d.status = 'CANCELLED' THEN 1 ELSE 0 END), 0) AS cancelled_count
+  FROM documents d
+  INNER JOIN stakeholders s ON s.id = d.stakeholder_id
+  WHERE d.document_type = '${types.documentsTypes.RENT_PRE_INVOICE}'
+  ${buildServiceOrdersReportWhere(stripPaginationFields(fields))};
+`
 
 const LINE_ITEM_TOTAL = '(dp.product_price + dp.unit_tax_amount - IFNULL(dp.unit_discount_amount, 0)) * dp.product_quantity'
 
@@ -794,11 +1137,24 @@ module.exports = {
   getClientAccountStateCount,
   getClientAccountStateSummary,
   getInventory,
+  getInventoryCount,
+  getInventorySummary,
   getSales,
+  getSalesCount,
+  getSalesSummary,
   getInvoice,
+  getInvoiceCount,
+  getInvoiceSummary,
   getReceipts,
+  getReceiptsCount,
+  getReceiptsSummary,
+  parseReceiptsFilterFields,
   getManualReceipts,
+  getManualReceiptsCount,
+  getManualReceiptsSummary,
   getServiceOrders,
+  getServiceOrdersCount,
+  getServiceOrdersSummary,
   getSalesProductReport,
   getSalesProductReportCount,
   getSalesProductReportSummary,
