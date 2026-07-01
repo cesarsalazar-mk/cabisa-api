@@ -1,4 +1,5 @@
 const { creditsPolicy, documentsTypes } = require('../types')
+const { getFormattedDates } = require('../common')
 // res.excludeProductOnCreateDetail: product_id
 // res.calculateSalesCommission: boolean
 // res.saveInventoryUnitValueAsProductPrice: boolean
@@ -65,6 +66,10 @@ const handleCreateDocument = async (req, res) => {
   const sales_commission_amount =
     res.calculateSalesCommission && !isNaN(salesCommissionPercentage) ? subtotal_amount * salesCommissionPercentage : null
 
+  const { created_at: resolvedCreatedAt } = getFormattedDates({
+    created_at: created_at || new Date().toISOString(),
+  })
+
   const isInvoiceOrPreInvoice = () =>
     document_type === documentsTypes.SELL_INVOICE ||
     document_type === documentsTypes.SELL_PRE_INVOICE ||
@@ -97,7 +102,7 @@ const handleCreateDocument = async (req, res) => {
     serie,
     document_number,
     uuid,
-    created_at
+    resolvedCreatedAt
   ]})
   
   const newDocumentId = await res.connection.geLastInsertId()
