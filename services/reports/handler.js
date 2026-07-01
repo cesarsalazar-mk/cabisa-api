@@ -12,17 +12,54 @@ module.exports.clientsAccountState = async event => {
     req.hasPermissions([types.permissions.REPORTS])
 
     const res = await handleRead(req, { dbQuery: db.query, storage: storage.getClientAccountState })
+    const filterFields = storage.stripPaginationFields(req.query)
+    const summaryRows = await db.query(storage.getClientAccountStateSummary(filterFields))
+    const countResult = await db.query(storage.getClientAccountStateCount(req.query))
 
-    const data = res.data.map(d => ({
-      ...d,
-      paid_credit : Number(d.paid_credit),
-      credit_limit: Number(d.credit_limit),
-      total_credit : d.total_charge,
-      current_credit: d.total_charge, // unpaid_credit
-      credit_balance: ((Number(d.total_charge)) - Number(d.paid_credit)), // available_credit
-    }))
+    const mapClient = d => {
+      const totalCharge = Number(d.total_charge) || 0
+      const paidCredit = Number(d.paid_credit) || 0
+      const creditBalance = totalCharge - paidCredit
 
-    return await handleResponse({ req, res: { ...res, data } })
+      return {
+        ...d,
+        paid_credit: paidCredit,
+        credit_limit: Number(d.credit_limit) || 0,
+        total_credit: totalCharge,
+        current_credit: totalCharge,
+        credit_balance: creditBalance,
+        has_debt: creditBalance > 0,
+        total_charge: totalCharge,
+      }
+    }
+
+    const summaryRow = summaryRows[0] || {}
+    const toNumber = value => Number(value) || 0
+
+    return await handleResponse({
+      req,
+      res: {
+        statusCode: 200,
+        data: {
+          items: res.data.map(mapClient),
+          summary: {
+            total_clients: toNumber(summaryRow.total_clients),
+            clients_with_debt: toNumber(summaryRow.clients_with_debt),
+            clients_without_debt: toNumber(summaryRow.clients_without_debt),
+            total_credit: toNumber(summaryRow.total_credit),
+            total_paid_credit: toNumber(summaryRow.total_paid_credit),
+            total_credit_balance: toNumber(summaryRow.total_credit_balance),
+            total_debt_balance: toNumber(summaryRow.total_debt_balance),
+            total_debt_charge: toNumber(summaryRow.total_debt_charge),
+            total_debt_paid: toNumber(summaryRow.total_debt_paid),
+            total_without_debt_balance: toNumber(summaryRow.total_without_debt_balance),
+            total_without_debt_charge: toNumber(summaryRow.total_without_debt_charge),
+            total_without_debt_paid: toNumber(summaryRow.total_without_debt_paid),
+          },
+          pagination: { total: toNumber(countResult[0]?.total) },
+        },
+      },
+    })
   } catch (error) {
     console.log(error)
     return await handleResponse({ error })
@@ -425,7 +462,8 @@ module.exports.exportReport = async event => {
           credit_limit: Number(d.credit_limit),
           total_credit : d.total_charge,
           current_credit: d.total_charge,
-          credit_balance: ((Number(d.total_charge)) - Number(d.paid_credit)),
+          credit_balance: Number(d.total_charge) - Number(d.paid_credit),
+          has_debt: Number(d.total_charge) - Number(d.paid_credit) > 0,
           total_charge: d.total_charge === null ? 0 : d.total_charge
         })) : []
 
