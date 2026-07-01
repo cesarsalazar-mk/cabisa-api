@@ -1,51 +1,161 @@
 const { types, getWhereConditions } = require(`${process.env['FILE_ENVIRONMENT']}/globals`)
 
-const getClientAccountState = (fields = {}) => `
-    SELECT
-    s.id,
-    s.stakeholder_type,
-    CASE
-    WHEN s.stakeholder_type = 'CLIENT_INDIVIDUAL' THEN 'CLIENTE INDIVIDUAL'
-    WHEN s.stakeholder_type = 'CLIENT_COMPANY' THEN 'EMPRESA'
-        ELSE 'NO DISPONIBLE' END as stakeholder_type_spanish,
-    s.status,
-    s.name,
-    s.address,
-    s.nit,
-    s.email,
-    s.phone,
-    s.alternative_phone,
-    s.business_man,
-    s.payments_man,
-    CASE
-      WHEN s.credit_limit IS NULL THEN 0
-      ELSE s.credit_limit END AS credit_limit,    
-    CASE
-      WHEN s.total_credit IS NULL THEN 0
-      ELSE s.total_credit END AS total_credit,    
-    CASE
-      WHEN s.paid_credit IS NULL THEN 0
-      ELSE s.paid_credit END AS paid_credit,
-    s.block_reason,
-    s.created_at,
-    s.created_by,
-    s.updated_at,
-    s.updated_by,
-    (SELECT
-    SUM(dc.total_amount)
+const CLIENT_CHARGES_SUBQUERY = `
+  COALESCE((
+    SELECT SUM(dc.total_amount)
     FROM documents dc
-    LEFT JOIN stakeholders sh ON sh.id = dc.stakeholder_id
     WHERE (
-      dc.document_type = 'SELL_INVOICE' OR
-      dc.document_type = 'RENT_INVOICE'
+      dc.document_type = '${types.documentsTypes.SELL_INVOICE}' OR
+      dc.document_type = '${types.documentsTypes.RENT_INVOICE}'
     )
-    AND sh.id = s.id
-    AND dc.status = 'APPROVED'
-    ORDER BY dc.id DESC) AS total_charge
+    AND dc.stakeholder_id = s.id
+    AND dc.status = '${types.documentsStatus.APPROVED}'
+  ), 0)`
+
+const parseClientAccountFilterFields = (fields = {}) => {
+  const { $limit, $offset, debt_status, ...filterFields } = fields
+
+  return { filterFields, debt_status: debt_status || '' }
+}
+
+const buildClientAccountInnerQuery = (filterFields = {}) => {
+  const whereConditions = getWhereConditions({
+    fields: filterFields,
+    tableAlias: 's',
+    hasPreviousConditions: false,
+  })
+
+  return `
+    SELECT
+      s.id,
+      s.stakeholder_type,
+      CASE
+        WHEN s.stakeholder_type = 'CLIENT_INDIVIDUAL' THEN 'CLIENTE INDIVIDUAL'
+        WHEN s.stakeholder_type = 'CLIENT_COMPANY' THEN 'EMPRESA'
+        ELSE 'NO DISPONIBLE'
+      END AS stakeholder_type_spanish,
+      s.status,
+      s.name,
+      s.address,
+      s.nit,
+      s.email,
+      s.phone,
+      s.alternative_phone,
+      s.business_man,
+      s.payments_man,
+      CASE WHEN s.credit_limit IS NULL THEN 0 ELSE s.credit_limit END AS credit_limit,
+      CASE WHEN s.total_credit IS NULL THEN 0 ELSE s.total_credit END AS total_credit,
+      CASE WHEN s.paid_credit IS NULL THEN 0 ELSE s.paid_credit END AS paid_credit,
+      s.block_reason,
+      s.created_at,
+      s.created_by,
+      s.updated_at,
+      s.updated_by,
+      ${CLIENT_CHARGES_SUBQUERY} AS total_charge
     FROM stakeholders s
-    ${getWhereConditions({ fields, tableAlias: 's', hasPreviousConditions: false })}
-    ORDER BY s.id DESC;  
+    ${whereConditions}
+  `
+}
+
+const buildClientAccountOuterQuery = (fields = {}, { withPagination = true } = {}) => {
+  const { filterFields, debt_status } = parseClientAccountFilterFields(
+    withPagination ? fields : stripPaginationFields(fields)
+  )
+  const paginationSQL = withPagination ? buildPaginationSQL(fields) : ''
+  const debtFilter = buildClientAccountDebtFilter(debt_status)
+
+  return `
+    SELECT
+      clients.*,
+      (clients.total_charge - clients.paid_credit) AS credit_balance_raw
+    FROM (
+      ${buildClientAccountInnerQuery(filterFields)}
+    ) clients
+    WHERE 1=1 ${debtFilter}
+    ORDER BY clients.id DESC
+    ${paginationSQL}
+  `
+}
+
+const buildClientAccountDebtFilter = (debtStatus = '') => {
+  if (debtStatus === 'WITH_DEBT') {
+    return ' AND (clients.total_charge - clients.paid_credit) > 0'
+  }
+
+  if (debtStatus === 'WITHOUT_DEBT') {
+    return ' AND (clients.total_charge - clients.paid_credit) <= 0'
+  }
+
+  return ''
+}
+
+const getClientAccountState = (fields = {}) => `${buildClientAccountOuterQuery(fields)};`
+
+const getClientAccountStateCount = (fields = {}) => `
+  SELECT COUNT(*) AS total
+  FROM (
+    ${buildClientAccountOuterQuery(fields, { withPagination: false })}
+  ) AS counted_clients;
 `
+
+const getClientAccountStateSummary = (fields = {}) => {
+  const { filterFields } = parseClientAccountFilterFields(stripPaginationFields(fields))
+
+  return `
+  SELECT
+    COUNT(*) AS total_clients,
+    SUM(CASE WHEN (clients.total_charge - clients.paid_credit) > 0 THEN 1 ELSE 0 END) AS clients_with_debt,
+    SUM(CASE WHEN (clients.total_charge - clients.paid_credit) <= 0 THEN 1 ELSE 0 END) AS clients_without_debt,
+    SUM(clients.total_charge) AS total_credit,
+    SUM(clients.paid_credit) AS total_paid_credit,
+    SUM(clients.total_charge - clients.paid_credit) AS total_credit_balance,
+    SUM(
+      CASE
+        WHEN (clients.total_charge - clients.paid_credit) > 0
+        THEN (clients.total_charge - clients.paid_credit)
+        ELSE 0
+      END
+    ) AS total_debt_balance,
+    SUM(
+      CASE
+        WHEN (clients.total_charge - clients.paid_credit) > 0
+        THEN clients.total_charge
+        ELSE 0
+      END
+    ) AS total_debt_charge,
+    SUM(
+      CASE
+        WHEN (clients.total_charge - clients.paid_credit) > 0
+        THEN clients.paid_credit
+        ELSE 0
+      END
+    ) AS total_debt_paid,
+    SUM(
+      CASE
+        WHEN (clients.total_charge - clients.paid_credit) <= 0
+        THEN (clients.total_charge - clients.paid_credit)
+        ELSE 0
+      END
+    ) AS total_without_debt_balance,
+    SUM(
+      CASE
+        WHEN (clients.total_charge - clients.paid_credit) <= 0
+        THEN clients.total_charge
+        ELSE 0
+      END
+    ) AS total_without_debt_charge,
+    SUM(
+      CASE
+        WHEN (clients.total_charge - clients.paid_credit) <= 0
+        THEN clients.paid_credit
+        ELSE 0
+      END
+    ) AS total_without_debt_paid
+  FROM (
+    ${buildClientAccountInnerQuery(filterFields)}
+  ) clients;
+  `
+}
 
 const getAccountsReceivable = (fields = {}) => {
   const rawWhereConditions = getWhereConditions({ fields, tableAlias: 'd' })
@@ -681,6 +791,8 @@ const getTopSoldItem = (fields = {}, itemType) => {
 module.exports = {
   getAccountsReceivable,
   getClientAccountState,
+  getClientAccountStateCount,
+  getClientAccountStateSummary,
   getInventory,
   getSales,
   getInvoice,
