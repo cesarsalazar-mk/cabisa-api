@@ -1,8 +1,10 @@
-const { types, getWhereConditions } = require(`${process.env['FILE_ENVIRONMENT']}/globals`)
+const { types, getWhereConditions, helpers } = require(`${process.env['FILE_ENVIRONMENT']}/globals`)
+const { invoiceAdjustments } = helpers
+const { getDocumentNetAdjustmentSql } = invoiceAdjustments
 
 const CLIENT_CHARGES_SUBQUERY = `
   COALESCE((
-    SELECT SUM(dc.total_amount)
+    SELECT SUM(dc.total_amount + ${getDocumentNetAdjustmentSql('dc')})
     FROM documents dc
     WHERE (
       dc.document_type = '${types.documentsTypes.SELL_INVOICE}' OR
@@ -165,6 +167,8 @@ const getAccountsReceivable = (fields = {}) => {
     SELECT
       d.id,
       d.document_type,
+      d.uuid,
+      d.document_number,
       d.stakeholder_id,
       s.stakeholder_type,
       s.name AS stakeholder_name,
@@ -311,6 +315,7 @@ const getSales = (fields = {}) => {
       d.status,
       d.sales_commission_amount,
       d.total_amount,
+      d.uuid,
       d.paid_credit_amount,
       d.created_at,
       u.sales_commission,
@@ -333,10 +338,20 @@ const getSalesCount = (fields = {}) => `
   WHERE ${buildSalesReportWhereSql(stripPaginationFields(fields))};
 `
 
+const getSalesSummaryRows = (fields = {}) => `
+  SELECT
+    d.uuid,
+    d.total_amount
+  FROM documents d
+  LEFT JOIN stakeholders s ON s.id = d.stakeholder_id
+  LEFT JOIN users u ON u.id = d.created_by
+  WHERE ${buildSalesReportWhereSql(stripPaginationFields(fields))};
+`
+
 const getSalesSummary = (fields = {}) => `
   SELECT
     COUNT(*) AS total_documents,
-    COALESCE(SUM(d.total_amount), 0) AS total_billed
+    COALESCE(SUM(d.total_amount + ${getDocumentNetAdjustmentSql('d')}), 0) AS total_billed
   FROM documents d
   LEFT JOIN stakeholders s ON s.id = d.stakeholder_id
   LEFT JOIN users u ON u.id = d.created_by
@@ -565,13 +580,23 @@ const getInvoiceCount = (fields = {}) => `
   WHERE ${getInvoiceTypeCondition('d')} ${buildInvoiceReportWhere(stripPaginationFields(fields))};
 `
 
+const getInvoiceSummaryRows = (fields = {}) => `
+  SELECT
+    d.uuid,
+    d.status,
+    d.total_amount
+  FROM documents d
+  LEFT JOIN stakeholders s ON s.id = d.stakeholder_id
+  WHERE ${getInvoiceTypeCondition('d')} ${buildInvoiceReportWhere(stripPaginationFields(fields))};
+`
+
 const getInvoiceSummary = (fields = {}) => `
   SELECT
     COUNT(*) AS total_invoices,
     COALESCE(SUM(CASE WHEN d.status = 'APPROVED' THEN 1 ELSE 0 END), 0) AS approved_count,
     COALESCE(SUM(CASE WHEN d.status = 'CANCELLED' THEN 1 ELSE 0 END), 0) AS cancelled_count,
-    COALESCE(SUM(CASE WHEN d.status = 'APPROVED' THEN d.total_amount ELSE 0 END), 0) AS approved_total,
-    COALESCE(SUM(CASE WHEN d.status = 'CANCELLED' THEN d.total_amount ELSE 0 END), 0) AS cancelled_total
+    COALESCE(SUM(CASE WHEN d.status = 'APPROVED' THEN d.total_amount + ${getDocumentNetAdjustmentSql('d')} ELSE 0 END), 0) AS approved_total,
+    COALESCE(SUM(CASE WHEN d.status = 'CANCELLED' THEN d.total_amount + ${getDocumentNetAdjustmentSql('d')} ELSE 0 END), 0) AS cancelled_total
   FROM documents d
   LEFT JOIN stakeholders s ON s.id = d.stakeholder_id
   WHERE ${getInvoiceTypeCondition('d')} ${buildInvoiceReportWhere(stripPaginationFields(fields))};
@@ -630,6 +655,7 @@ const getReceipts = (fields = {}) => {
   return `
     SELECT
       d.id,
+      d.uuid,
       d.document_number,
       d.related_internal_document_id,
       d.document_type,
@@ -734,22 +760,39 @@ const getReceiptsCount = (fields = {}) => `
   ${buildReceiptsReportWhere(stripPaginationFields(fields))};
 `
 
+const getReceiptSummaryRows = (fields = {}) => `
+  SELECT
+    d.uuid,
+    d.document_number,
+    d.total_amount,
+    COALESCE((
+      SELECT SUM(p.payment_amount)
+      FROM payments p
+      WHERE p.document_id = d.id AND (p.is_deleted = 0 OR p.is_deleted IS NULL)
+    ), 0) AS paid_amount
+  FROM documents d
+  LEFT JOIN stakeholders s ON s.id = d.stakeholder_id
+  WHERE ${getInvoiceTypeCondition('d')}
+  AND d.status = 'APPROVED'
+  ${buildReceiptsReportWhere(stripPaginationFields(fields))};
+`
+
 const getReceiptsSummary = (fields = {}) => `
   SELECT
     COUNT(*) AS total_invoices,
-    COALESCE(SUM(total_amount), 0) AS total_billed,
+    COALESCE(SUM(adjusted_total_amount), 0) AS total_billed,
     COALESCE(SUM(paid_amount), 0) AS total_paid,
     COALESCE(SUM(CASE WHEN document_number IS NOT NULL THEN 1 ELSE 0 END), 0) AS electronic_count,
     COALESCE(SUM(CASE WHEN document_number IS NULL THEN 1 ELSE 0 END), 0) AS system_count,
-    COALESCE(SUM(CASE WHEN document_number IS NOT NULL THEN total_amount ELSE 0 END), 0) AS electronic_billed,
-    COALESCE(SUM(CASE WHEN document_number IS NULL THEN total_amount ELSE 0 END), 0) AS system_billed,
+    COALESCE(SUM(CASE WHEN document_number IS NOT NULL THEN adjusted_total_amount ELSE 0 END), 0) AS electronic_billed,
+    COALESCE(SUM(CASE WHEN document_number IS NULL THEN adjusted_total_amount ELSE 0 END), 0) AS system_billed,
     COALESCE(SUM(CASE WHEN document_number IS NOT NULL THEN paid_amount ELSE 0 END), 0) AS electronic_paid,
     COALESCE(SUM(CASE WHEN document_number IS NULL THEN paid_amount ELSE 0 END), 0) AS system_paid
   FROM (
     SELECT
       d.id,
       d.document_number,
-      d.total_amount,
+      d.total_amount + ${getDocumentNetAdjustmentSql('d')} AS adjusted_total_amount,
       COALESCE((
         SELECT SUM(p.payment_amount)
         FROM payments p
@@ -1142,12 +1185,15 @@ module.exports = {
   getSales,
   getSalesCount,
   getSalesSummary,
+  getSalesSummaryRows,
   getInvoice,
   getInvoiceCount,
   getInvoiceSummary,
+  getInvoiceSummaryRows,
   getReceipts,
   getReceiptsCount,
   getReceiptsSummary,
+  getReceiptSummaryRows,
   parseReceiptsFilterFields,
   getManualReceipts,
   getManualReceiptsCount,

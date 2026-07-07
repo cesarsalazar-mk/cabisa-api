@@ -1,9 +1,25 @@
 const mysql = require('mysql2/promise')
 const { mysqlConfig, helpers, types } = require(`${process.env['FILE_ENVIRONMENT']}/globals`)
 const storage = require('./storage')
-const { handleRead, handleRequest, handleResponse } = helpers
+const { handleRead, handleRequest, handleResponse, invoiceAdjustments } = helpers
 const db = mysqlConfig(mysql)
 const Excel = require('exceljs')
+
+const enrichReportDocuments = (documents, totalField = 'total') =>
+  invoiceAdjustments.enrichDocumentsWithAdjustments(documents, db.query, { totalField })
+
+const applyAdjustedExportValues = rows =>
+  rows.map(row => {
+    const adjustedTotal = Number(row.adjusted_total ?? row.total_amount ?? row.total ?? 0)
+    const due = Number(row.due || 0)
+
+    return {
+      ...row,
+      total: adjustedTotal,
+      total_amount: adjustedTotal,
+      differenceAmount: adjustedTotal - due,
+    }
+  })
 
 module.exports.clientsAccountState = async event => {
   try {
@@ -74,7 +90,24 @@ module.exports.accountsReceivable = async event => {
 
     const res = await handleRead(req, { dbQuery: db.query, storage: storage.getAccountsReceivable })
 
-    return await handleResponse({ req, res })
+    const items = await enrichReportDocuments(res.data, 'total_amount')
+    const enrichedItems = items.map(row => {
+      const adjustedTotal = Number(row.adjusted_total ?? row.total_amount ?? 0)
+      const paidCredit = Number(row.paid_credit_amount || 0)
+
+      return {
+        ...row,
+        unpaid_credit_amount: adjustedTotal - paidCredit,
+      }
+    })
+
+    return await handleResponse({
+      req,
+      res: {
+        ...res,
+        data: enrichedItems,
+      },
+    })
   } catch (error) {
     console.log(error)
     return await handleResponse({ error })
@@ -95,13 +128,14 @@ module.exports.sales = async event => {
 
     const summaryRow = summaryRows[0] || {}
     const toNumber = value => Number(value) || 0
+    const enrichedItems = await enrichReportDocuments(res.data, 'total_amount')
 
     return await handleResponse({
       req,
       res: {
         statusCode: 200,
         data: {
-          items: res.data,
+          items: enrichedItems,
           summary: {
             total_documents: toNumber(summaryRow.total_documents),
             total_billed: toNumber(summaryRow.total_billed),
@@ -197,13 +231,14 @@ module.exports.getDocumentReport = async (event, context) => {
       ...invoice,
       discount_percentage: invoice.products[0]?.discount_percentage,
     }))
+    const enrichedItems = await enrichReportDocuments(items, 'total')
 
     return await handleResponse({
       req,
       res: {
         statusCode: 200,
         data: {
-          items,
+          items: enrichedItems,
           summary: {
             total_invoices: toNumber(summaryRow.total_invoices),
             approved_count: toNumber(summaryRow.approved_count),
@@ -312,6 +347,7 @@ module.exports.getCashReceipts = async (event, context) => {
     const countResult = await db.query(storage.getReceiptsCount(req.query))
 
     const items = res.data[0] ? res.data.map(mapCashReceiptDocument) : []
+    const enrichedItems = await enrichReportDocuments(items, 'total_amount')
     const toNumber = value => Number(value) || 0
 
     return await handleResponse({
@@ -319,7 +355,7 @@ module.exports.getCashReceipts = async (event, context) => {
       res: {
         statusCode: 200,
         data: {
-          items,
+          items: enrichedItems,
           summary: buildReceiptsSummary(summaryRows[0] || {}),
           pagination: { total: toNumber(countResult[0]?.total) },
         },
@@ -768,6 +804,24 @@ module.exports.exportReport = async event => {
         break
       default:
         break;
+    }
+
+    if (reportType === 'documentReport' && result?.data?.length) {
+      result.data = applyAdjustedExportValues(
+        await enrichReportDocuments(result.data, 'total')
+      )
+    }
+
+    if (reportType === 'cashReceipts' && result?.data?.length) {
+      result.data = applyAdjustedExportValues(
+        await enrichReportDocuments(result.data, 'total_amount')
+      )
+    }
+
+    if (reportType === 'salesReport' && result?.data?.length) {
+      result.data = applyAdjustedExportValues(
+        await enrichReportDocuments(result.data, 'total_amount')
+      )
     }
                 
     const manifestData = result.data ? result.data : []

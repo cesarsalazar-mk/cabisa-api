@@ -29,6 +29,7 @@ const {
   handleUpdateDocument,
   handleUpdateCreditPaidDate,
   handleUpdateDocumentPaidAmount,
+  invoiceAdjustments,
 } = helpers
 const { parentChildProductsValidator } = validators
 const db = mysqlConfig(mysql)
@@ -57,13 +58,18 @@ module.exports.read = async event => {
       ...invoice,
       discount_percentage: invoice.products[0]?.discount_percentage,
     }))
+    const enrichedItems = await invoiceAdjustments.enrichDocumentsWithAdjustments(
+      items,
+      db.query,
+      { totalField: 'total' }
+    )
 
     return await handleResponse({
       req,
       res: {
         statusCode: 200,
         data: {
-          items,
+          items: enrichedItems,
           pagination: { total: countResult[0]?.total || 0 },
         },
       },
