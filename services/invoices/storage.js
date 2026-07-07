@@ -140,34 +140,9 @@ const checkInventoryMovementsOnApprove = whereIn => `
   GROUP BY im.id, imd.inventory_movement_id
 `
 
-const findAdjustmentsByBillUuids = uuids => {
-  if (!uuids?.length) return null
-
-  const placeholders = uuids.map(() => '?').join(', ')
-
-  return {
-    query: `
-      SELECT
-        dcn.id,
-        dcn.document_type,
-        dcn.document_number,
-        dcn.serie,
-        dcn.related_bill_uuid,
-        dcn.created_at,
-        dcn.request_detail
-      FROM documents_debit_credit_notes dcn
-      WHERE dcn.error = 'NO ERRORS'
-        AND dcn.related_bill_uuid IN (${placeholders})
-      ORDER BY dcn.created_at ASC, dcn.id ASC
-    `,
-    params: uuids,
-  }
-}
-
 module.exports = {
   checkInventoryMovementsOnApprove,
   checkProjectExists,
-  findAdjustmentsByBillUuids,
   findAllBy,
   findAllByCount,
   findCreditStatus,
