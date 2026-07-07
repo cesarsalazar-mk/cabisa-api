@@ -25,26 +25,45 @@ module.exports.readServiceVersion = async () => {
   }
 }
 
+const enrichManualPaymentsData = data =>
+  data[0]
+    ? data.map(d => ({
+        ...d,
+        payments:
+          d.payments && d.payments[0]
+            ? d.payments.reduce((r, p) => {
+                const isDuplicate =
+                  r[0] && r.some(rp => Number(rp.payment_id) === Number(p.payment_id))
+
+                if (isDuplicate || !p.payment_id || p.is_deleted) return r
+                else return [...r, p]
+              }, [])
+            : [],
+      }))
+    : []
+
 module.exports.read = async event => {
   try {
     const req = await handleRequest({ event })
 
     const res = await handleRead(req, { dbQuery: db.query, storage: storage.findAllBy, nestedFieldsKeys: ['payments'] })
-      
-    const data = res.data[0]
-      ? res.data.map(d => ({
-          ...d,                    
-          payments:
-            d.payments && d.payments[0]
-              ? d.payments.reduce((r, p) => {
-                  const isDuplicate = r[0] && r.some(rp => Number(rp.payment_id) === Number(p.payment_id))
 
-                  if (isDuplicate || !p.payment_id || p.is_deleted) return r
-                  else return [...r, p]
-                }, [])
-              : [],
-        }))
-      : []
+    const data = enrichManualPaymentsData(res.data)
+
+    if (req.query.$limit) {
+      const countResult = await db.query(storage.findAllByCount(req.query))
+
+      return await handleResponse({
+        req,
+        res: {
+          statusCode: 200,
+          data: {
+            items: data,
+            pagination: { total: Number(countResult[0]?.total) || 0 },
+          },
+        },
+      })
+    }
 
     return await handleResponse({ req, res: { ...res, data } })
   } catch (error) {

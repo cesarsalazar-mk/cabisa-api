@@ -1,8 +1,47 @@
 const { types, getWhereConditions } = require(`${process.env['FILE_ENVIRONMENT']}/globals`)
 
+const stripPaginationFields = (fields = {}) => {
+  const { $limit, $offset, ...filterFields } = fields
+
+  return filterFields
+}
+
+const buildPaginationSQL = (fields = {}) => {
+  const limit = fields.$limit
+  const offset = fields.$offset
+
+  if (!limit) return ''
+
+  const offsetSQL = offset ? ` OFFSET ${offset}` : ''
+
+  return `LIMIT ${limit}${offsetSQL}`
+}
+
+const buildWhereConditions = (fields = {}, paymentAlias = 'd', stakeholderAlias = 's') => {
+  const rawWhereConditions = getWhereConditions({ fields, tableAlias: paymentAlias })
+
+  return rawWhereConditions
+    .replace(new RegExp(`${paymentAlias}\\.nit`, 'gi'), `${stakeholderAlias}.nit`)
+    .replace(new RegExp(`${paymentAlias}\\.name`, 'gi'), `${stakeholderAlias}.name`)
+}
+
 const findAllBy = (fields = {}) => {
-  const rawWhereConditions = getWhereConditions({ fields, tableAlias: 'd' })
-  const whereConditions = rawWhereConditions.replace(/d.nit/i, 's.nit').replace(/d.name/i, 's.name')
+  const filterFields = stripPaginationFields(fields)
+  const paginationSQL = buildPaginationSQL(fields)
+  const whereConditions = buildWhereConditions(filterFields)
+  const paginationSubquery = paginationSQL
+    ? `
+    AND d.id IN (
+      SELECT id FROM (
+        SELECT DISTINCT d2.id
+        FROM manual_payments d2
+        LEFT JOIN stakeholders s2 ON d2.stakeholder_id = s2.id
+        WHERE 1 = 1 ${buildWhereConditions(filterFields, 'd2', 's2')}
+        ORDER BY d2.id DESC
+        ${paginationSQL}
+      ) AS paginated_manual_payments
+    )`
+    : ''
 
   return `
   SELECT
@@ -35,10 +74,23 @@ FROM manual_payments d
 LEFT JOIN manual_payments_detail paydetail on d.id = paydetail.manual_payment
 LEFT JOIN projects proj ON d.project_id = proj.id
 LEFT JOIN stakeholders s ON d.stakeholder_id = s.id
-    WHERE 1 = 1      
+    WHERE 1 = 1
     ${whereConditions}
+    ${paginationSubquery}
     ORDER BY d.id DESC
   `
+}
+
+const findAllByCount = (fields = {}) => {
+  const filterFields = stripPaginationFields(fields)
+  const whereConditions = buildWhereConditions(filterFields)
+
+  return `
+  SELECT COUNT(DISTINCT d.id) AS total
+  FROM manual_payments d
+  LEFT JOIN stakeholders s ON d.stakeholder_id = s.id
+  WHERE 1 = 1 ${whereConditions}
+`
 }
 
 const findDocumentPayments = () => `
@@ -145,6 +197,7 @@ module.exports = {
   deletePayments,
   crupdatePayments,
   findAllBy,
+  findAllByCount,
   findDocumentsWithDefaultCredits,
   findDocumentPayments,
   getPaymentsByDocumentId,

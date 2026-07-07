@@ -1,6 +1,45 @@
 const { getWhereConditions } = require(`${process.env['FILE_ENVIRONMENT']}/globals`)
 
-const findAllBy = (fields = {}, initWhereCondition = `(p.is_active = 1 OR p.is_active IS NULL)`) => `
+const stripPaginationFields = (fields = {}) => {
+  const { $limit, $offset, ...filterFields } = fields
+
+  return filterFields
+}
+
+const buildPaginationSQL = (fields = {}) => {
+  const limit = fields.$limit
+  const offset = fields.$offset
+
+  if (!limit) return ''
+
+  const offsetSQL = offset ? ` OFFSET ${offset}` : ''
+
+  return `LIMIT ${limit}${offsetSQL}`
+}
+
+const getInitWhereConditionForAlias = (initWhereCondition, alias) =>
+  initWhereCondition.replace(/\bp\./g, `${alias}.`)
+
+const findAllBy = (fields = {}, initWhereCondition = `(p.is_active = 1 OR p.is_active IS NULL)`) => {
+  const filterFields = stripPaginationFields(fields)
+  const paginationSQL = buildPaginationSQL(fields)
+  const whereConditions = getWhereConditions({ fields: filterFields, tableAlias: 's' })
+  const initConditionSubquery = getInitWhereConditionForAlias(initWhereCondition, 'p2')
+  const paginationSubquery = paginationSQL
+    ? `
+  AND s.id IN (
+    SELECT id FROM (
+      SELECT DISTINCT s2.id
+      FROM stakeholders s2
+      LEFT JOIN projects p2 ON p2.stakeholder_id = s2.id
+      WHERE ${initConditionSubquery} ${getWhereConditions({ fields: filterFields, tableAlias: 's2' })}
+      ORDER BY s2.id DESC
+      ${paginationSQL}
+    ) AS paginated_stakeholders
+  )`
+    : ''
+
+  return `
   SELECT 
     s.id,
     s.stakeholder_type,
@@ -28,9 +67,22 @@ const findAllBy = (fields = {}, initWhereCondition = `(p.is_active = 1 OR p.is_a
     p.created_at AS projects__created_at
   FROM stakeholders s
   LEFT JOIN projects p ON p.stakeholder_id = s.id
-  WHERE ${initWhereCondition} ${getWhereConditions({ fields, tableAlias: 's' })}
+  WHERE ${initWhereCondition} ${whereConditions}
+  ${paginationSubquery}
   ORDER BY s.id DESC
 `
+}
+
+const findAllByCount = (fields = {}, initWhereCondition = `(p.is_active = 1 OR p.is_active IS NULL)`) => {
+  const filterFields = stripPaginationFields(fields)
+
+  return `
+  SELECT COUNT(DISTINCT s.id) AS total
+  FROM stakeholders s
+  LEFT JOIN projects p ON p.stakeholder_id = s.id
+  WHERE ${initWhereCondition} ${getWhereConditions({ fields: filterFields, tableAlias: 's' })}
+`
+}
 
 const findStakeholderTypes = () => `DESCRIBE stakeholders stakeholder_type`
 
@@ -85,6 +137,7 @@ module.exports = {
   crupdateProjects,
   deleteProjects,
   findAllBy,
+  findAllByCount,
   findOptionsBy,
   findProjectsOptionsBy,
   findStakeholderTypes,
