@@ -25,37 +25,61 @@ module.exports.readServiceVersion = async () => {
   }
 }
 
+const enrichPaymentsData = data =>
+  data[0]
+    ? data.map(d => ({
+        ...d,
+        discount_percentage: d.products[0]?.discount_percentage,
+        products:
+          d.products && d.products[0]
+            ? d.products.reduce((r, p) => {
+                const isDuplicate =
+                  r[0] &&
+                  r.some(
+                    rp =>
+                      Number(rp.id) === Number(p.id) &&
+                      Number(rp.parent_product_id) === Number(p.parent_product_id)
+                  )
+
+                if (isDuplicate) return r
+                else return [...r, p]
+              }, [])
+            : [],
+        payments:
+          d.payments && d.payments[0]
+            ? d.payments.reduce((r, p) => {
+                const isDuplicate =
+                  r[0] && r.some(rp => Number(rp.payment_id) === Number(p.payment_id))
+
+                if (isDuplicate || !p.payment_id || p.is_deleted) return r
+                else return [...r, p]
+              }, [])
+            : [],
+      }))
+    : []
+
 module.exports.read = async event => {
   try {
     const req = await handleRequest({ event })
 
     const res = await handleRead(req, { dbQuery: db.query, storage: storage.findAllBy, nestedFieldsKeys: ['products', 'payments'] })
 
-    const data = res.data[0]
-      ? res.data.map(d => ({
-          ...d,
-          discount_percentage: d.products[0].discount_percentage,
-          products:
-            d.products && d.products[0]
-              ? d.products.reduce((r, p) => {
-                  const isDuplicate =
-                    r[0] && r.some(rp => Number(rp.id) === Number(p.id) && Number(rp.parent_product_id) === Number(p.parent_product_id))
+    const data = enrichPaymentsData(res.data)
 
-                  if (isDuplicate) return r
-                  else return [...r, p]
-                }, [])
-              : [],
-          payments:
-            d.payments && d.payments[0]
-              ? d.payments.reduce((r, p) => {
-                  const isDuplicate = r[0] && r.some(rp => Number(rp.payment_id) === Number(p.payment_id))
+    if (req.query.$limit) {
+      const countResult = await db.query(storage.findAllByCount(req.query))
 
-                  if (isDuplicate || !p.payment_id || p.is_deleted) return r
-                  else return [...r, p]
-                }, [])
-              : [],
-        }))
-      : []
+      return await handleResponse({
+        req,
+        res: {
+          statusCode: 200,
+          data: {
+            items: data,
+            pagination: { total: Number(countResult[0]?.total) || 0 },
+          },
+        },
+      })
+    }
 
     return await handleResponse({ req, res: { ...res, data } })
   } catch (error) {

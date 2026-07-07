@@ -1,6 +1,46 @@
 const { types, getWhereConditions } = require(`${process.env['FILE_ENVIRONMENT']}/globals`)
 
-const findAllBy = (fields = {}) => `
+const stripPaginationFields = (fields = {}) => {
+  const { $limit, $offset, ...filterFields } = fields
+
+  return filterFields
+}
+
+const buildPaginationSQL = (fields = {}) => {
+  const limit = fields.$limit
+  const offset = fields.$offset
+
+  if (!limit) return ''
+
+  const offsetSQL = offset ? ` OFFSET ${offset}` : ''
+
+  return `LIMIT ${limit}${offsetSQL}`
+}
+
+const getDocumentTypeCondition = (alias = 'd') =>
+  `${alias}.document_type = '${types.documentsTypes.PURCHASE_ORDER}'`
+
+const findAllBy = (fields = {}) => {
+  const filterFields = stripPaginationFields(fields)
+  const paginationSQL = buildPaginationSQL(fields)
+  const whereConditions = getWhereConditions({ fields: filterFields, tableAlias: 'd' })
+  const paginationSubquery = paginationSQL
+    ? `
+  AND d.id IN (
+    SELECT id FROM (
+      SELECT d2.id
+      FROM documents d2
+      WHERE ${getDocumentTypeCondition('d2')} ${getWhereConditions({
+        fields: filterFields,
+        tableAlias: 'd2',
+      })}
+      ORDER BY d2.id DESC
+      ${paginationSQL}
+    ) AS paginated_documents
+  )`
+    : ''
+
+  return `
   SELECT
     d.id,
     d.stakeholder_id,
@@ -33,9 +73,21 @@ const findAllBy = (fields = {}) => `
   LEFT JOIN stakeholders s ON s.id = d.stakeholder_id
   LEFT JOIN documents_products dp ON dp.document_id = d.id
   LEFT JOIN products p ON p.id = dp.product_id
-  WHERE d.document_type = '${types.documentsTypes.PURCHASE_ORDER}' ${getWhereConditions({ fields, tableAlias: 'd' })}
+  WHERE ${getDocumentTypeCondition('d')} ${whereConditions}
+  ${paginationSubquery}
   ORDER BY d.id DESC
 `
+}
+
+const findAllByCount = (fields = {}) => {
+  const filterFields = stripPaginationFields(fields)
+
+  return `
+  SELECT COUNT(*) AS total
+  FROM documents d
+  WHERE ${getDocumentTypeCondition('d')} ${getWhereConditions({ fields: filterFields, tableAlias: 'd' })}
+`
+}
 
 const checkInventoryMovementsOnApprove = whereIn => `
   SELECT im.id, im.quantity AS total_qty, SUM(imd.quantity) AS approved_qty
@@ -51,4 +103,5 @@ const checkInventoryMovementsOnApprove = whereIn => `
 module.exports = {
   checkInventoryMovementsOnApprove,
   findAllBy,
+  findAllByCount,
 }
