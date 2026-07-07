@@ -42,9 +42,54 @@ module.exports.parseToJson = async (xml, xml2js) =>
   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 `
 
+const stripPaginationFields = (fields = {}) => {
+  const { $limit, $offset, ...filterFields } = fields
+
+  return filterFields
+}
+
+const buildPaginationSQL = (fields = {}) => {
+  const limit = fields.$limit
+  const offset = fields.$offset
+
+  if (!limit) return ''
+
+  const offsetSQL = offset ? ` OFFSET ${offset}` : ''
+
+  return `LIMIT ${limit}${offsetSQL}`
+}
+
+const buildDebitCreditNotesWhere = (fields = {}, noteAlias = 'dcn', stakeholderAlias = 's') => {
+  const filterFields = stripPaginationFields(fields)
+  const rawWhereConditions = getWhereConditions({ fields: filterFields, tableAlias: 'd' })
+
+  return rawWhereConditions
+    .replace(/d\.nit/gi, `${stakeholderAlias}.nit`)
+    .replace(/d\.name/gi, `${stakeholderAlias}.name`)
+    .replace(/d\.start_date/gi, `DATE(${noteAlias}.created_at)`)
+    .replace(/d\.end_date/gi, `DATE(${noteAlias}.created_at)`)
+    .replace(/d\.related_bill_document_number/gi, `${noteAlias}.related_bill_document_number`)
+    .replace(/d\.document_type/gi, `${noteAlias}.document_type`)
+}
+
 module.exports.getDebitCreditNotes = (fields = {}) => {
-  const rawWhereConditions = getWhereConditions({ fields, tableAlias: 'd' })  
-  const whereConditions = rawWhereConditions.replace(/d.nit/i, 's.nit').replace(/d.name/i, 's.name').replace(/d.start_date/i, 'DATE(dcn.created_at)').replace(/d.end_date/i, 'DATE(dcn.created_at)').replace(/d.related_bill_document_number/i,'dcn.related_bill_document_number')
+  const whereConditions = buildDebitCreditNotesWhere(fields)
+  const paginationSQL = buildPaginationSQL(fields)
+  const paginationSubquery = paginationSQL
+    ? `
+    AND dcn.id IN (
+      SELECT id FROM (
+        SELECT dcn2.id
+        FROM documents_debit_credit_notes dcn2
+        JOIN stakeholders s2 ON s2.id = dcn2.stakeholder_id
+        WHERE dcn2.error = 'NO ERRORS'
+        ${buildDebitCreditNotesWhere(fields, 'dcn2', 's2')}
+        ORDER BY dcn2.id DESC
+        ${paginationSQL}
+      ) AS paginated_notes
+    )`
+    : ''
+
   return `
   select
       s.id,
@@ -66,9 +111,30 @@ module.exports.getDebitCreditNotes = (fields = {}) => {
       dcn.created_at
 from documents_debit_credit_notes dcn
 JOIN stakeholders s ON s.id = dcn.stakeholder_id
-    WHERE (1 = 1) 
+    WHERE dcn.error = 'NO ERRORS'
     ${whereConditions}
-    and error = 'NO ERRORS'
+    ${paginationSubquery}
     ORDER BY dcn.id DESC
   `
 }
+
+module.exports.getDebitCreditNotesCount = (fields = {}) => `
+  SELECT COUNT(*) AS total
+  FROM documents_debit_credit_notes dcn
+  JOIN stakeholders s ON s.id = dcn.stakeholder_id
+  WHERE dcn.error = 'NO ERRORS'
+  ${buildDebitCreditNotesWhere(stripPaginationFields(fields))};
+`
+
+module.exports.getDebitCreditNotesSummary = (fields = {}) => `
+  SELECT
+    COUNT(*) AS total_notes,
+    COALESCE(SUM(CASE WHEN dcn.document_type = 'DEBITO' THEN 1 ELSE 0 END), 0) AS debit_count,
+    COALESCE(SUM(CASE WHEN dcn.document_type = 'CREDITO' THEN 1 ELSE 0 END), 0) AS credit_count
+  FROM documents_debit_credit_notes dcn
+  JOIN stakeholders s ON s.id = dcn.stakeholder_id
+  WHERE dcn.error = 'NO ERRORS'
+  ${buildDebitCreditNotesWhere(stripPaginationFields(fields))};
+`
+
+module.exports.stripPaginationFields = stripPaginationFields
