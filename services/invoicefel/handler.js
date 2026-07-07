@@ -5,7 +5,7 @@ const mysql = require(`mysql2/promise`)
 const xml2js = require('xml2js')
 const { v4: uuidv4 } = require(`uuid`)
 const { buildXml,buildXmlFcam,handleRequest, handleResponse,handleRead,buidCancelXml,buildCreditDebitNote } = helpers
-const { createInvoiceFelLogDocument,findByDocumentId,parseToJson,createDebitCreditLogDocument,getDebitCreditNotes } = require('./storage')
+const { createInvoiceFelLogDocument,findByDocumentId,parseToJson,createDebitCreditLogDocument,getDebitCreditNotes,getDebitCreditNotesCount,getDebitCreditNotesSummary,stripPaginationFields } = require('./storage')
 const db = mysqlConfig(mysql)
 
 module.exports.create = async (event, context) => {
@@ -234,8 +234,30 @@ module.exports.createDebitCreditNote = async (event, context) => {
 module.exports.getDocumentDebitCreditNote = async (event, context) => {    
   try {        
     const req = await handleRequest({ event })
-    const res = await handleRead(req, { dbQuery: db.query, storage: getDebitCreditNotes})    
-    return await handleResponse({ req, res: { ...res } })
+    const res = await handleRead(req, { dbQuery: db.query, storage: getDebitCreditNotes })
+
+    const filterFields = stripPaginationFields(req.query)
+    const summaryRows = await db.query(getDebitCreditNotesSummary(filterFields))
+    const countResult = await db.query(getDebitCreditNotesCount(req.query))
+
+    const summaryRow = summaryRows[0] || {}
+    const toNumber = value => Number(value) || 0
+
+    return await handleResponse({
+      req,
+      res: {
+        statusCode: 200,
+        data: {
+          items: res.data,
+          summary: {
+            total_notes: toNumber(summaryRow.total_notes),
+            debit_count: toNumber(summaryRow.debit_count),
+            credit_count: toNumber(summaryRow.credit_count),
+          },
+          pagination: { total: toNumber(countResult[0]?.total) },
+        },
+      },
+    })
   } catch (error) {
     console.log(error)
     return await handleResponse({ error })
