@@ -1,10 +1,24 @@
 const { types, getWhereConditions } = require(`${process.env['FILE_ENVIRONMENT']}/globals`)
 
 const stripPaginationFields = (fields = {}) => {
-  const { $limit, $offset, ...filterFields } = fields
+  const { $limit, $offset, system_invoice, ...filterFields } = fields
 
   return filterFields
 }
+
+const parseInvoiceQueryFields = (fields = {}) => {
+  const { $limit, $offset, system_invoice, ...filterFields } = fields
+  const systemInvoiceOnly =
+    system_invoice === true ||
+    system_invoice === 'true' ||
+    system_invoice === 1 ||
+    system_invoice === '1'
+
+  return { filterFields, systemInvoiceOnly }
+}
+
+const getSystemInvoiceSql = (alias = 'd', systemInvoiceOnly = false) =>
+  systemInvoiceOnly ? ` AND ${alias}.document_number IS NULL` : ''
 
 const buildPaginationSQL = (fields = {}) => {
   const limit = fields.$limit
@@ -29,9 +43,11 @@ const buildWhereConditions = (fields = {}, docAlias = 'd', stakeholderAlias = 's
 }
 
 const findAllBy = (fields = {}) => {
-  const filterFields = stripPaginationFields(fields)
+  const { filterFields, systemInvoiceOnly } = parseInvoiceQueryFields(fields)
   const paginationSQL = buildPaginationSQL(fields)
   const whereConditions = buildWhereConditions(filterFields)
+  const systemInvoiceSql = getSystemInvoiceSql('d', systemInvoiceOnly)
+  const systemInvoiceSqlInner = getSystemInvoiceSql('d2', systemInvoiceOnly)
   const paginationSubquery = paginationSQL
     ? `
     AND d.id IN (
@@ -39,7 +55,7 @@ const findAllBy = (fields = {}) => {
         SELECT d2.id
         FROM documents d2
         LEFT JOIN stakeholders s2 ON s2.id = d2.stakeholder_id
-        WHERE ${getInvoiceTypeCondition('d2')} ${buildWhereConditions(filterFields, 'd2', 's2')}
+        WHERE ${getInvoiceTypeCondition('d2')} ${buildWhereConditions(filterFields, 'd2', 's2')}${systemInvoiceSqlInner}
         ORDER BY d2.id DESC
         ${paginationSQL}
       ) AS paginated_documents
@@ -101,21 +117,22 @@ const findAllBy = (fields = {}) => {
     LEFT JOIN stakeholders s ON s.id = d.stakeholder_id
     LEFT JOIN documents_products dp ON dp.document_id = d.id
     LEFT JOIN products prod ON prod.id = dp.product_id
-    WHERE ${getInvoiceTypeCondition('d')} ${whereConditions}
+    WHERE ${getInvoiceTypeCondition('d')} ${whereConditions}${systemInvoiceSql}
     ${paginationSubquery}
     ORDER BY d.id DESC
   `
 }
 
 const findAllByCount = (fields = {}) => {
-  const filterFields = stripPaginationFields(fields)
+  const { filterFields, systemInvoiceOnly } = parseInvoiceQueryFields(fields)
   const whereConditions = buildWhereConditions(filterFields)
+  const systemInvoiceSql = getSystemInvoiceSql('d', systemInvoiceOnly)
 
   return `
   SELECT COUNT(*) AS total
   FROM documents d
   LEFT JOIN stakeholders s ON s.id = d.stakeholder_id
-  WHERE ${getInvoiceTypeCondition('d')} ${whereConditions};
+  WHERE ${getInvoiceTypeCondition('d')} ${whereConditions}${systemInvoiceSql};
   `
 }
 
