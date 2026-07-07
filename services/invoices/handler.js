@@ -33,6 +33,82 @@ const {
 const { parentChildProductsValidator } = validators
 const db = mysqlConfig(mysql)
 
+const getNoteAmountFromDetail = requestDetail => {
+  if (!requestDetail) return 0
+
+  try {
+    const data =
+      typeof requestDetail === 'string' ? JSON.parse(requestDetail) : requestDetail
+
+    return (data?.invoice?.items || []).reduce(
+      (sum, item) =>
+        sum + Number(item.payment_amount || 0) * Number(item.payment_qty || 0),
+      0
+    )
+  } catch (error) {
+    return 0
+  }
+}
+
+const enrichInvoicesWithAdjustments = async invoices => {
+  const uuids = [...new Set(invoices.map(invoice => invoice.uuid).filter(Boolean))]
+
+  if (!uuids.length) {
+    return invoices.map(invoice => ({
+      ...invoice,
+      adjustments: [],
+      credit_adjustment: 0,
+      debit_adjustment: 0,
+      net_adjustment: 0,
+      adjusted_total: Number(invoice.total || 0),
+      adjustments_count: 0,
+    }))
+  }
+
+  const adjustmentsQuery = storage.findAdjustmentsByBillUuids(uuids)
+  const adjustmentRows = await db.query(adjustmentsQuery.query, adjustmentsQuery.params)
+  const adjustmentsByUuid = {}
+
+  adjustmentRows.forEach(row => {
+    const amount = getNoteAmountFromDetail(row.request_detail)
+    const entry = {
+      id: row.id,
+      document_type: row.document_type,
+      document_number: row.document_number,
+      serie: row.serie,
+      amount,
+      created_at: row.created_at,
+    }
+
+    if (!adjustmentsByUuid[row.related_bill_uuid]) {
+      adjustmentsByUuid[row.related_bill_uuid] = []
+    }
+
+    adjustmentsByUuid[row.related_bill_uuid].push(entry)
+  })
+
+  return invoices.map(invoice => {
+    const adjustments = adjustmentsByUuid[invoice.uuid] || []
+    const credit_adjustment = adjustments
+      .filter(adjustment => adjustment.document_type === 'CREDITO')
+      .reduce((sum, adjustment) => sum + adjustment.amount, 0)
+    const debit_adjustment = adjustments
+      .filter(adjustment => adjustment.document_type === 'DEBITO')
+      .reduce((sum, adjustment) => sum + adjustment.amount, 0)
+    const net_adjustment = debit_adjustment - credit_adjustment
+
+    return {
+      ...invoice,
+      adjustments,
+      credit_adjustment,
+      debit_adjustment,
+      net_adjustment,
+      adjusted_total: Number(invoice.total || 0) + net_adjustment,
+      adjustments_count: adjustments.length,
+    }
+  })
+}
+
 module.exports.readServiceVersion = async () => {
   try {
     const servicePackage = require('./package.json')
@@ -57,13 +133,14 @@ module.exports.read = async event => {
       ...invoice,
       discount_percentage: invoice.products[0]?.discount_percentage,
     }))
+    const enrichedItems = await enrichInvoicesWithAdjustments(items)
 
     return await handleResponse({
       req,
       res: {
         statusCode: 200,
         data: {
-          items,
+          items: enrichedItems,
           pagination: { total: countResult[0]?.total || 0 },
         },
       },
