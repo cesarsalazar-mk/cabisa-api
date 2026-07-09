@@ -21,11 +21,14 @@ const parseClientAccountFilterFields = (fields = {}) => {
 }
 
 const buildClientAccountInnerQuery = (filterFields = {}) => {
-  const whereConditions = getWhereConditions({
+  const rawWhereConditions = getWhereConditions({
     fields: filterFields,
     tableAlias: 's',
     hasPreviousConditions: false,
   })
+  const whereConditions = rawWhereConditions
+    .replace(/s\.start_date/gi, 'DATE(s.created_at)')
+    .replace(/s\.end_date/gi, 'DATE(s.created_at)')
 
   return `
     SELECT
