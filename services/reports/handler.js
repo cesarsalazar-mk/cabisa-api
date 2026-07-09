@@ -45,6 +45,7 @@ module.exports.clientsAccountState = async event => {
         current_credit: totalCharge,
         credit_balance: creditBalance,
         has_debt: creditBalance > 0,
+        has_overdue_debt_120: Boolean(Number(d.has_overdue_debt_120)),
         total_charge: totalCharge,
       }
     }
@@ -675,6 +676,7 @@ module.exports.exportReport = async event => {
           current_credit: d.total_charge,
           credit_balance: Number(d.total_charge) - Number(d.paid_credit),
           has_debt: Number(d.total_charge) - Number(d.paid_credit) > 0,
+          has_overdue_debt_120: Boolean(Number(d.has_overdue_debt_120)),
           total_charge: d.total_charge === null ? 0 : d.total_charge
         })) : []
 
