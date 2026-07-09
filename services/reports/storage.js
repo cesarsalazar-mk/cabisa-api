@@ -14,6 +14,29 @@ const CLIENT_CHARGES_SUBQUERY = `
     AND dc.status = '${types.documentsStatus.APPROVED}'
   ), 0)`
 
+const CLIENT_OVERDUE_DAYS_THRESHOLD = 120
+
+const CLIENT_OVERDUE_DEBT_120_SUBQUERY = `
+  CASE WHEN (
+    ${CLIENT_CHARGES_SUBQUERY} - COALESCE(s.paid_credit, 0)
+  ) > 0 AND EXISTS (
+    SELECT 1
+    FROM documents dc
+    WHERE dc.stakeholder_id = s.id
+      AND (
+        dc.document_type = '${types.documentsTypes.SELL_INVOICE}' OR
+        dc.document_type = '${types.documentsTypes.RENT_INVOICE}'
+      )
+      AND dc.status = '${types.documentsStatus.APPROVED}'
+      AND DATEDIFF(
+        CURDATE(),
+        COALESCE(
+          DATE(dc.credit_due_date),
+          DATE_ADD(DATE(dc.created_at), INTERVAL COALESCE(dc.credit_days, 0) DAY)
+        )
+      ) > ${CLIENT_OVERDUE_DAYS_THRESHOLD}
+  ) THEN 1 ELSE 0 END`
+
 const parseClientAccountFilterFields = (fields = {}) => {
   const { $limit, $offset, debt_status, ...filterFields } = fields
 
@@ -21,11 +44,14 @@ const parseClientAccountFilterFields = (fields = {}) => {
 }
 
 const buildClientAccountInnerQuery = (filterFields = {}) => {
-  const whereConditions = getWhereConditions({
+  const rawWhereConditions = getWhereConditions({
     fields: filterFields,
     tableAlias: 's',
     hasPreviousConditions: false,
   })
+  const whereConditions = rawWhereConditions
+    .replace(/s\.start_date/gi, 'DATE(s.created_at)')
+    .replace(/s\.end_date/gi, 'DATE(s.created_at)')
 
   return `
     SELECT
@@ -53,17 +79,47 @@ const buildClientAccountInnerQuery = (filterFields = {}) => {
       s.created_by,
       s.updated_at,
       s.updated_by,
-      ${CLIENT_CHARGES_SUBQUERY} AS total_charge
+      ${CLIENT_CHARGES_SUBQUERY} AS total_charge,
+      ${CLIENT_OVERDUE_DEBT_120_SUBQUERY} AS has_overdue_debt_120
     FROM stakeholders s
     ${whereConditions}
   `
 }
 
 const buildClientAccountOuterQuery = (fields = {}, { withPagination = true } = {}) => {
-  const { filterFields, debt_status } = parseClientAccountFilterFields(
-    withPagination ? fields : stripPaginationFields(fields)
-  )
   const paginationSQL = withPagination ? buildPaginationSQL(fields) : ''
+
+  return `
+    SELECT
+      filtered_clients.*
+    FROM (
+      ${buildClientAccountFilteredClientsSubquery(fields)}
+    ) filtered_clients
+    ORDER BY filtered_clients.id DESC
+    ${paginationSQL}
+  `
+}
+
+const buildClientAccountDebtFilter = (debtStatus = '') => {
+  if (debtStatus === 'WITH_DEBT') {
+    return ' AND (clients.total_charge - clients.paid_credit) > 0'
+  }
+
+  if (debtStatus === 'WITH_DEBT_OVER_120') {
+    return ' AND clients.has_overdue_debt_120 = 1'
+  }
+
+  if (debtStatus === 'WITHOUT_DEBT') {
+    return ' AND (clients.total_charge - clients.paid_credit) <= 0'
+  }
+
+  return ''
+}
+
+const buildClientAccountFilteredClientsSubquery = (fields = {}) => {
+  const { filterFields, debt_status } = parseClientAccountFilterFields(
+    stripPaginationFields(fields)
+  )
   const debtFilter = buildClientAccountDebtFilter(debt_status)
 
   return `
@@ -74,21 +130,7 @@ const buildClientAccountOuterQuery = (fields = {}, { withPagination = true } = {
       ${buildClientAccountInnerQuery(filterFields)}
     ) clients
     WHERE 1=1 ${debtFilter}
-    ORDER BY clients.id DESC
-    ${paginationSQL}
   `
-}
-
-const buildClientAccountDebtFilter = (debtStatus = '') => {
-  if (debtStatus === 'WITH_DEBT') {
-    return ' AND (clients.total_charge - clients.paid_credit) > 0'
-  }
-
-  if (debtStatus === 'WITHOUT_DEBT') {
-    return ' AND (clients.total_charge - clients.paid_credit) <= 0'
-  }
-
-  return ''
 }
 
 const getClientAccountState = (fields = {}) => `${buildClientAccountOuterQuery(fields)};`
@@ -100,64 +142,60 @@ const getClientAccountStateCount = (fields = {}) => `
   ) AS counted_clients;
 `
 
-const getClientAccountStateSummary = (fields = {}) => {
-  const { filterFields } = parseClientAccountFilterFields(stripPaginationFields(fields))
-
-  return `
+const getClientAccountStateSummary = (fields = {}) => `
   SELECT
     COUNT(*) AS total_clients,
-    SUM(CASE WHEN (clients.total_charge - clients.paid_credit) > 0 THEN 1 ELSE 0 END) AS clients_with_debt,
-    SUM(CASE WHEN (clients.total_charge - clients.paid_credit) <= 0 THEN 1 ELSE 0 END) AS clients_without_debt,
-    SUM(clients.total_charge) AS total_credit,
-    SUM(clients.paid_credit) AS total_paid_credit,
-    SUM(clients.total_charge - clients.paid_credit) AS total_credit_balance,
+    SUM(CASE WHEN (filtered_clients.total_charge - filtered_clients.paid_credit) > 0 THEN 1 ELSE 0 END) AS clients_with_debt,
+    SUM(CASE WHEN (filtered_clients.total_charge - filtered_clients.paid_credit) <= 0 THEN 1 ELSE 0 END) AS clients_without_debt,
+    SUM(filtered_clients.total_charge) AS total_credit,
+    SUM(filtered_clients.paid_credit) AS total_paid_credit,
+    SUM(filtered_clients.total_charge - filtered_clients.paid_credit) AS total_credit_balance,
     SUM(
       CASE
-        WHEN (clients.total_charge - clients.paid_credit) > 0
-        THEN (clients.total_charge - clients.paid_credit)
+        WHEN (filtered_clients.total_charge - filtered_clients.paid_credit) > 0
+        THEN (filtered_clients.total_charge - filtered_clients.paid_credit)
         ELSE 0
       END
     ) AS total_debt_balance,
     SUM(
       CASE
-        WHEN (clients.total_charge - clients.paid_credit) > 0
-        THEN clients.total_charge
+        WHEN (filtered_clients.total_charge - filtered_clients.paid_credit) > 0
+        THEN filtered_clients.total_charge
         ELSE 0
       END
     ) AS total_debt_charge,
     SUM(
       CASE
-        WHEN (clients.total_charge - clients.paid_credit) > 0
-        THEN clients.paid_credit
+        WHEN (filtered_clients.total_charge - filtered_clients.paid_credit) > 0
+        THEN filtered_clients.paid_credit
         ELSE 0
       END
     ) AS total_debt_paid,
     SUM(
       CASE
-        WHEN (clients.total_charge - clients.paid_credit) <= 0
-        THEN (clients.total_charge - clients.paid_credit)
+        WHEN (filtered_clients.total_charge - filtered_clients.paid_credit) <= 0
+        THEN (filtered_clients.total_charge - filtered_clients.paid_credit)
         ELSE 0
       END
     ) AS total_without_debt_balance,
     SUM(
       CASE
-        WHEN (clients.total_charge - clients.paid_credit) <= 0
-        THEN clients.total_charge
+        WHEN (filtered_clients.total_charge - filtered_clients.paid_credit) <= 0
+        THEN filtered_clients.total_charge
         ELSE 0
       END
     ) AS total_without_debt_charge,
     SUM(
       CASE
-        WHEN (clients.total_charge - clients.paid_credit) <= 0
-        THEN clients.paid_credit
+        WHEN (filtered_clients.total_charge - filtered_clients.paid_credit) <= 0
+        THEN filtered_clients.paid_credit
         ELSE 0
       END
     ) AS total_without_debt_paid
   FROM (
-    ${buildClientAccountInnerQuery(filterFields)}
-  ) clients;
-  `
-}
+    ${buildClientAccountFilteredClientsSubquery(fields)}
+  ) filtered_clients;
+`
 
 const getAccountsReceivable = (fields = {}) => {
   const rawWhereConditions = getWhereConditions({ fields, tableAlias: 'd' })
