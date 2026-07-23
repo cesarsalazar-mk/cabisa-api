@@ -1,4 +1,4 @@
-const { types, getWhereConditions, helpers } = require(`${process.env['FILE_ENVIRONMENT']}/globals`)
+const { types, getWhereConditions, helpers, toGuatemalaDateSql } = require(`${process.env['FILE_ENVIRONMENT']}/globals`)
 const { invoiceAdjustments } = helpers
 const { getDocumentNetAdjustmentSql } = invoiceAdjustments
 
@@ -32,7 +32,7 @@ const CLIENT_OVERDUE_DEBT_120_SUBQUERY = `
         CURDATE(),
         COALESCE(
           DATE(dc.credit_due_date),
-          DATE_ADD(DATE(dc.created_at), INTERVAL COALESCE(dc.credit_days, 0) DAY)
+          DATE_ADD(${toGuatemalaDateSql('dc.updated_at')}, INTERVAL COALESCE(dc.credit_days, 0) DAY)
         )
       ) > ${CLIENT_OVERDUE_DAYS_THRESHOLD}
   ) THEN 1 ELSE 0 END`
@@ -50,8 +50,8 @@ const buildClientAccountInnerQuery = (filterFields = {}) => {
     hasPreviousConditions: false,
   })
   const whereConditions = rawWhereConditions
-    .replace(/s\.start_date/gi, 'DATE(s.created_at)')
-    .replace(/s\.end_date/gi, 'DATE(s.created_at)')
+    .replace(/s\.start_date/gi, toGuatemalaDateSql('s.created_at'))
+    .replace(/s\.end_date/gi, toGuatemalaDateSql('s.created_at'))
 
   return `
     SELECT
@@ -199,7 +199,15 @@ const getClientAccountStateSummary = (fields = {}) => `
 
 const getAccountsReceivable = (fields = {}) => {
   const rawWhereConditions = getWhereConditions({ fields, tableAlias: 'd' })
-  const whereConditions = rawWhereConditions.replace(/d.stakeholder_type/i, 's.stakeholder_type').replace(/d.stakeholder_name/i, 's.name')
+  const whereConditions = rawWhereConditions
+    .replace(/d.stakeholder_type/i, 's.stakeholder_type')
+    .replace(/d.stakeholder_name/i, 's.name')
+    .replace(/d\.start_date/gi, toGuatemalaDateSql('d.updated_at'))
+    .replace(/d\.end_date/gi, toGuatemalaDateSql('d.updated_at'))
+    .replace(/d\.credit_due_from/gi, toGuatemalaDateSql('d.credit_due_date'))
+    .replace(/d\.credit_due_to/gi, toGuatemalaDateSql('d.credit_due_date'))
+    .replace(/d\.credit_paid_from/gi, toGuatemalaDateSql('d.credit_paid_date'))
+    .replace(/d\.credit_paid_to/gi, toGuatemalaDateSql('d.credit_paid_date'))
 
   return `
     SELECT
@@ -218,7 +226,7 @@ const getAccountsReceivable = (fields = {}) => {
       d.credit_status,
       d.paid_credit_amount,
       (d.total_amount - d.paid_credit_amount) AS unpaid_credit_amount,
-      d.created_at AS document_date,
+      d.updated_at AS document_date,
       d.credit_due_date,
       d.credit_paid_date
     FROM documents d
@@ -258,8 +266,8 @@ const buildSalesReportQueryParts = (
     .replace(new RegExp(`${docAlias}\\.client_id`, 'gi'), `${stakeholderAlias}.id`)
     .replace(new RegExp(`AND ${docAlias}\\.document_type = 'INVOICES'`, 'gi'), '')
     .replace(new RegExp(`AND ${docAlias}\\.document_type = 'PRE_INVOICE'`, 'gi'), '')
-    .replace(/start_date/gi, 'created_at')
-    .replace(/end_date/gi, 'created_at')
+    .replace(new RegExp(`${docAlias}\\.start_date`, 'gi'), toGuatemalaDateSql(`${docAlias}.updated_at`))
+    .replace(new RegExp(`${docAlias}\\.end_date`, 'gi'), toGuatemalaDateSql(`${docAlias}.updated_at`))
     .replace(new RegExp(`${docAlias}\\.seller_id`, 'gi'), `${userAlias}.id`)
 
   const invoicesWhereConditions =
@@ -355,7 +363,7 @@ const getSales = (fields = {}) => {
       d.total_amount,
       d.uuid,
       d.paid_credit_amount,
-      d.created_at,
+      d.updated_at AS created_at,
       u.sales_commission,
       d.created_by AS seller_id,
       u.full_name AS seller_name
@@ -401,8 +409,8 @@ const buildInventoryWhere = (fields = {}, productAlias = 'p') => {
   const rawWhereConditions = getWhereConditions({ fields: filterFields, tableAlias: productAlias })
 
   return rawWhereConditions
-    .replace(new RegExp(`${productAlias}\\.start_date`, 'gi'), 'imd.created_at')
-    .replace(new RegExp(`${productAlias}\\.end_date`, 'gi'), 'imd.created_at')
+    .replace(new RegExp(`${productAlias}\\.start_date`, 'gi'), toGuatemalaDateSql('imd.created_at'))
+    .replace(new RegExp(`${productAlias}\\.end_date`, 'gi'), toGuatemalaDateSql('imd.created_at'))
     .replace(new RegExp(`${productAlias}\\.product_id`, 'gi'), `${productAlias}.id`)
 }
 
@@ -521,8 +529,16 @@ const buildInvoiceReportWhere = (fields = {}, docAlias = 'd', stakeholderAlias =
   return rawWhereConditions
     .replace(new RegExp(`${docAlias}\\.nit`, 'gi'), `${stakeholderAlias}.nit`)
     .replace(new RegExp(`${docAlias}\\.name`, 'gi'), `${stakeholderAlias}.name`)
-    .replace(new RegExp(`${docAlias}\\.start_date`, 'gi'), `DATE(${docAlias}.created_at)`)
-    .replace(new RegExp(`${docAlias}\\.end_date`, 'gi'), `DATE(${docAlias}.created_at)`)
+    .replace(
+      new RegExp(`${docAlias}\\.updated_from`, 'gi'),
+      toGuatemalaDateSql(`${docAlias}.updated_at`)
+    )
+    .replace(
+      new RegExp(`${docAlias}\\.updated_to`, 'gi'),
+      toGuatemalaDateSql(`${docAlias}.updated_at`)
+    )
+    .replace(new RegExp(`${docAlias}\\.start_date`, 'gi'), toGuatemalaDateSql(`${docAlias}.created_at`))
+    .replace(new RegExp(`${docAlias}\\.end_date`, 'gi'), toGuatemalaDateSql(`${docAlias}.created_at`))
 }
 
 const getInvoice = (fields = {}) => {
@@ -663,8 +679,8 @@ const buildReceiptsReportWhere = (fields = {}, docAlias = 'd', stakeholderAlias 
   const whereConditions = rawWhereConditions
     .replace(new RegExp(`${docAlias}\\.nit`, 'gi'), `${stakeholderAlias}.nit`)
     .replace(new RegExp(`${docAlias}\\.name`, 'gi'), `${stakeholderAlias}.name`)
-    .replace(new RegExp(`${docAlias}\\.start_date`, 'gi'), `DATE(${docAlias}.created_at)`)
-    .replace(new RegExp(`${docAlias}\\.end_date`, 'gi'), `DATE(${docAlias}.created_at)`)
+    .replace(new RegExp(`${docAlias}\\.start_date`, 'gi'), toGuatemalaDateSql(`${docAlias}.updated_at`))
+    .replace(new RegExp(`${docAlias}\\.end_date`, 'gi'), toGuatemalaDateSql(`${docAlias}.updated_at`))
 
   return systemInvoice
     ? `${whereConditions} AND ${docAlias}.document_number IS NULL`
@@ -727,7 +743,7 @@ const getReceipts = (fields = {}) => {
         WHEN d.credit_status = 'PAID' THEN 'PAGADO'
         WHEN d.credit_status = 'DEFAULT' THEN 'EN MORA'
           ELSE 'NO DISPONIBLE' END as credit_status_spanish,
-      d.created_at,
+      d.updated_at AS created_at,
       d.created_by,
       d.updated_at,
       d.updated_by,
@@ -851,8 +867,8 @@ const buildManualReceiptsReportWhere = (fields = {}, docAlias = 'd', stakeholder
   return rawWhereConditions
     .replace(new RegExp(`${docAlias}\\.nit`, 'gi'), `${stakeholderAlias}.nit`)
     .replace(new RegExp(`${docAlias}\\.name`, 'gi'), `${stakeholderAlias}.name`)
-    .replace(new RegExp(`${docAlias}\\.start_date`, 'gi'), `DATE(${docAlias}.created_at)`)
-    .replace(new RegExp(`${docAlias}\\.end_date`, 'gi'), `DATE(${docAlias}.created_at)`)
+    .replace(new RegExp(`${docAlias}\\.start_date`, 'gi'), toGuatemalaDateSql(`${docAlias}.created_at`))
+    .replace(new RegExp(`${docAlias}\\.end_date`, 'gi'), toGuatemalaDateSql(`${docAlias}.created_at`))
 }
 
 const getManualReceipts = (fields = {}) => {
@@ -951,6 +967,7 @@ const buildServiceOrdersReportWhere = (fields = {}, docAlias = 'd', stakeholderA
   return rawWhereConditions
     .replace(new RegExp(`${docAlias}\\.name`, 'gi'), `${stakeholderAlias}.name`)
     .replace(new RegExp(`${docAlias}\\.start_date`, 'gi'), `DATE(${docAlias}.start_date)`)
+    .replace(new RegExp(`${docAlias}\\.end_date`, 'gi'), `DATE(${docAlias}.start_date)`)
 }
 
 const getServiceOrders = (fields = {}) => {
@@ -993,7 +1010,7 @@ const getServiceOrders = (fields = {}) => {
     d.cancel_reason,
     d.credit_days,
     u.full_name AS creator_name,
-    d.created_at,
+    d.updated_at AS created_at,
     d.created_by,
     d.updated_at,
     d.updated_by,
@@ -1120,8 +1137,8 @@ const buildSalesProductReportWhere = (fields = {}, itemType = null) => {
   return `${rawWhereConditions
     .replace(/d\.code/gi, 'prod.code')
     .replace(/d\.description/gi, 'prod.description')
-    .replace(/d\.start_date/gi, 'DATE(d.created_at)')
-    .replace(/d\.end_date/gi, 'DATE(d.created_at)')
+    .replace(/d\.start_date/gi, toGuatemalaDateSql('d.updated_at'))
+    .replace(/d\.end_date/gi, toGuatemalaDateSql('d.updated_at'))
     .replace(/d\.product_type/gi, 'prod.product_type')
     .replace(/d\.item_type/gi, SALES_ITEM_TYPE_SQL)
     .replace(/d\.sales_category/gi, 'prod.sales_category')}${buildItemTypeFilter(resolvedItemType)}`

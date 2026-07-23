@@ -1,4 +1,4 @@
-const { types, getWhereConditions } = require(`${process.env['FILE_ENVIRONMENT']}/globals`)
+const { types, getWhereConditions, toGuatemalaDateSql } = require(`${process.env['FILE_ENVIRONMENT']}/globals`)
 
 const stripPaginationFields = (fields = {}) => {
   const { $limit, $offset, ...filterFields } = fields
@@ -23,6 +23,8 @@ const buildWhereConditions = (fields = {}, paymentAlias = 'd', stakeholderAlias 
   return rawWhereConditions
     .replace(new RegExp(`${paymentAlias}\\.nit`, 'gi'), `${stakeholderAlias}.nit`)
     .replace(new RegExp(`${paymentAlias}\\.name`, 'gi'), `${stakeholderAlias}.name`)
+    .replace(new RegExp(`${paymentAlias}\\.start_date`, 'gi'), toGuatemalaDateSql(`${paymentAlias}.created_at`))
+    .replace(new RegExp(`${paymentAlias}\\.end_date`, 'gi'), toGuatemalaDateSql(`${paymentAlias}.created_at`))
 }
 
 const findAllBy = (fields = {}) => {
