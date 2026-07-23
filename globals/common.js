@@ -285,6 +285,14 @@ const getFormattedDates = dates =>
     {}
   )
 
+// Stored datetimes are UTC wall-clock values without timezone marker (see getFormattedDates).
+// Do NOT change inserts; convert only when filtering/displaying for Guatemala (UTC-6).
+const GUATEMALA_TIMEZONE = 'America/Guatemala'
+const GUATEMALA_UTC_OFFSET_HOURS = 6
+
+const toGuatemalaDateSql = field =>
+  `DATE(DATE_SUB(${field}, INTERVAL ${GUATEMALA_UTC_OFFSET_HOURS} HOUR))`
+
 const decorate =
   (...functionsToDecorate) =>
   (...decoratorFunctions) => {
@@ -424,6 +432,9 @@ module.exports = {
   getFormattedDates,
   getWhereConditions,
   groupJoinResult,
+  GUATEMALA_TIMEZONE,
+  GUATEMALA_UTC_OFFSET_HOURS,
+  toGuatemalaDateSql,
   isEmail,
   isEmptyObject,
   validate,

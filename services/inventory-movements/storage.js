@@ -1,4 +1,9 @@
-const { types, getWhereConditions } = require(`${process.env['FILE_ENVIRONMENT']}/globals`)
+const { types, getWhereConditions, toGuatemalaDateSql } = require(`${process.env['FILE_ENVIRONMENT']}/globals`)
+
+const buildAdjustmentWhereConditions = (fields = {}) =>
+  getWhereConditions({ fields, tableAlias: 'ia', hasPreviousConditions: false })
+    .replace(/ia\.start_date/gi, toGuatemalaDateSql('ia.created_at'))
+    .replace(/ia\.end_date/gi, toGuatemalaDateSql('ia.created_at'))
 
 const findAllBy = (fields = {}) => `
   SELECT
@@ -47,7 +52,7 @@ const findAllAdjustmentsBy = (fields = {}) => `
   FROM inventory_adjustments ia
   LEFT JOIN inventory_adjustments_products iap ON iap.inventory_adjustment_id = ia.id
   LEFT JOIN products p ON p.id = iap.product_id
-  ${getWhereConditions({ fields, tableAlias: 'ia', hasPreviousConditions: false })}
+  ${buildAdjustmentWhereConditions(fields)}
   ORDER BY ia.id DESC
 `
 

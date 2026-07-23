@@ -550,7 +550,7 @@ module.exports.exportReport = async event => {
           { name: 'Nro. Documento', column: 'document_number', width: 12 },
           { name: 'UUID', column: 'uuid', width: 36 },
           { name: 'Cliente', column: 'stakeholder_name', width: 48 },
-          { name: 'Fecha de facturacion', column: 'created_at', width: 18, numFmt: 'dd-mm-yyyy hh:mm:ss'},          
+          { name: 'Fecha de Certificacion', column: 'updated_at', width: 18, numFmt: 'dd-mm-yyyy hh:mm:ss'},
           { name: 'Total', column: 'total', width: 14 ,numFmt: '"Q"#,##0.00'},
           { name: 'Metodo de pago', column: 'payment_method_spanish', width: 17 },
           { name: 'Estado', column: 'status_spanish', width: 17 }      

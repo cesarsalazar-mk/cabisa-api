@@ -1,4 +1,4 @@
-const { types, getWhereConditions } = require(`${process.env['FILE_ENVIRONMENT']}/globals`)
+const { types, getWhereConditions, toGuatemalaDateSql } = require(`${process.env['FILE_ENVIRONMENT']}/globals`)
 
 module.exports.createInvoiceFelLogDocument = () => `
   INSERT INTO log_documents (response_pdf, request, error, response_json, document_id, serie, created_by,uuid)
@@ -66,8 +66,8 @@ const buildDebitCreditNotesWhere = (fields = {}, noteAlias = 'dcn', stakeholderA
   return rawWhereConditions
     .replace(/d\.nit/gi, `${stakeholderAlias}.nit`)
     .replace(/d\.name/gi, `${stakeholderAlias}.name`)
-    .replace(/d\.start_date/gi, `DATE(${noteAlias}.created_at)`)
-    .replace(/d\.end_date/gi, `DATE(${noteAlias}.created_at)`)
+    .replace(/d\.start_date/gi, toGuatemalaDateSql(`${noteAlias}.created_at`))
+    .replace(/d\.end_date/gi, toGuatemalaDateSql(`${noteAlias}.created_at`))
     .replace(/d\.related_bill_document_number/gi, `${noteAlias}.related_bill_document_number`)
     .replace(/d\.document_type/gi, `${noteAlias}.document_type`)
 }
