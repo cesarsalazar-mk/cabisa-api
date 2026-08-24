@@ -33,9 +33,13 @@ create table log_documents
     created_by    varchar(250) null,
     serie         varchar(250) null,
     uuid          varchar(250) null,
+    cabisa_document_id int       null,
     constraint log_documents_UN
         unique (id)
 );
+
+create index log_documents_cabisa_document_id_IDX
+    on log_documents (cabisa_document_id);
 
 create index log_documents_document_id_IDX
     on log_documents (document_id);
@@ -268,7 +272,7 @@ create table documents
     product_id                   int                                                                                                             null,
     related_internal_document_id int                                                                                                             null,
     related_external_document_id varchar(50)                                                                                                     null,
-    status                       enum ('PENDING', 'APPROVED', 'CANCELLED') default 'PENDING'                                                     not null,
+    status                       enum ('PENDING', 'APPROVED', 'CANCELLED', 'SAT_FAILED') default 'PENDING'                                                     not null,
     comments                     text                                                                                                            null,
     received_by                  varchar(255)                                                                                                    null,
     dispatched_by                varchar(255)                                                                                                    null,
@@ -294,6 +298,7 @@ create table documents
     serie                        varchar(500)                                                                                                    null,
     document_number              varchar(500)                                                                                                    null,
     uuid                         varchar(500)                                                                                                    null,
+    fact_date                    datetime                                                                                                        null,
     constraint documents_created_by_fk
         foreign key (created_by) references users (id),
     constraint documents_operation_id_fk

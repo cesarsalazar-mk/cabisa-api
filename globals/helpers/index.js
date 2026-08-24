@@ -21,6 +21,13 @@ const buildXmlFcam = require('./buildInvoiceFcamXml')
 const buidCancelXml = require('./buildCancelXml')
 const buildCreditDebitNote = require('./builCreditDebitNote')
 const invoiceAdjustments = require('./invoiceAdjustments')
+const buildInvoiceFelPayload = require('./buildInvoiceFelPayload')
+const { certifyInvoiceFel, getFelLogTimestamp } = require('./certifyInvoiceFel')
+const validateInvoiceBusinessRules = require('./validateInvoiceBusinessRules')
+const {
+  finalizeExistingSellInvoice,
+  applyFelCertificationToDocument,
+} = require('./finalizeSellInvoice')
 
 module.exports = {
   handleApproveDocument,
@@ -46,4 +53,10 @@ module.exports = {
   buidCancelXml,
   buildCreditDebitNote,
   invoiceAdjustments,
+  buildInvoiceFelPayload,
+  certifyInvoiceFel,
+  getFelLogTimestamp,
+  validateInvoiceBusinessRules,
+  finalizeExistingSellInvoice,
+  applyFelCertificationToDocument,
 }

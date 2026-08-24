@@ -1,4 +1,4 @@
-const { types, getWhereConditions, toGuatemalaDateSql } = require(`${process.env['FILE_ENVIRONMENT']}/globals`)
+const { types, getWhereConditions, toGuatemalaDateSql, toFactDateSql } = require(`${process.env['FILE_ENVIRONMENT']}/globals`)
 
 const stripPaginationFields = (fields = {}) => {
   const { $limit, $offset, system_invoice, ...filterFields } = fields
@@ -42,11 +42,11 @@ const buildWhereConditions = (fields = {}, docAlias = 'd', stakeholderAlias = 's
     .replace(new RegExp(`${docAlias}\\.name`, 'gi'), `${stakeholderAlias}.name`)
     .replace(
       new RegExp(`${docAlias}\\.updated_from`, 'gi'),
-      toGuatemalaDateSql(`${docAlias}.updated_at`)
+      toFactDateSql(`${docAlias}.fact_date`)
     )
     .replace(
       new RegExp(`${docAlias}\\.updated_to`, 'gi'),
-      toGuatemalaDateSql(`${docAlias}.updated_at`)
+      toFactDateSql(`${docAlias}.fact_date`)
     )
     .replace(new RegExp(`${docAlias}\\.start_date`, 'gi'), toGuatemalaDateSql(`${docAlias}.created_at`))
     .replace(new RegExp(`${docAlias}\\.end_date`, 'gi'), toGuatemalaDateSql(`${docAlias}.created_at`))
@@ -79,6 +79,7 @@ const findAllBy = (fields = {}) => {
       d.document_number,
       d.related_internal_document_id,
       d.uuid,
+      d.fact_date,
       d.document_type,
       d.stakeholder_id,
       s.name AS stakeholder_name,
@@ -167,6 +168,61 @@ const checkInventoryMovementsOnApprove = whereIn => `
   GROUP BY im.id, imd.inventory_movement_id
 `
 
+const findDocumentForCertify = documentsType => {
+  const documentTypeWhereValues = documentsType.map(dt => `d.document_type = '${dt}'`)
+
+  return `
+  SELECT
+    d.id AS document_id,
+    d.document_type AS document_type,
+    d.stakeholder_id AS stakeholder_id,
+    d.operation_id AS operation_id,
+    d.project_id AS project_id,
+    d.related_internal_document_id AS related_internal_document_id,
+    d.related_external_document_id AS related_external_document_id,
+    d.status AS status,
+    d.status AS document_status,
+    d.payment_method AS payment_method,
+    d.subtotal_amount AS subtotal_amount,
+    d.total_discount_amount AS total_discount_amount,
+    d.total_tax_amount AS total_tax_amount,
+    d.total_amount AS total_amount,
+    d.credit_days AS credit_days,
+    d.description AS description,
+    d.serie AS serie,
+    d.document_number AS document_number,
+    d.uuid AS uuid,
+    d.fact_date AS fact_date,
+    d.created_by AS created_by,
+    s.id AS stakeholder__id,
+    s.name AS stakeholder__name,
+    s.nit AS stakeholder__nit,
+    s.address AS stakeholder__address,
+    s.email AS stakeholder__email,
+    s.phone AS stakeholder__phone,
+    p.description AS products__description,
+    p.code AS products__code,
+    dp.product_id AS products__product_id,
+    dp.product_price AS products__product_price,
+    dp.service_type AS products__service_type,
+    dp.product_quantity AS products__product_quantity,
+    dp.discount_percentage AS products__discount_percentage,
+    dp.parent_product_id AS products__parent_product_id
+  FROM documents d
+  LEFT JOIN documents_products dp ON dp.document_id = d.id
+  LEFT JOIN products p ON p.id = dp.product_id
+  LEFT JOIN stakeholders s ON s.id = d.stakeholder_id
+  WHERE d.id = ? AND (${documentTypeWhereValues.join(' OR ')})
+`
+}
+
+const checkDocumentByUuid = () => `
+  SELECT id, status, uuid
+  FROM documents
+  WHERE uuid = ? AND uuid IS NOT NULL AND uuid <> ''
+  LIMIT 1
+`
+
 module.exports = {
   checkInventoryMovementsOnApprove,
   checkProjectExists,
@@ -176,4 +232,6 @@ module.exports = {
   findInvoiceServiceType,
   findInvoiceStatus,
   findPaymentMethods,
+  findDocumentForCertify,
+  checkDocumentByUuid,
 }

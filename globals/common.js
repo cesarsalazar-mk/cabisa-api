@@ -285,6 +285,15 @@ const getFormattedDates = dates =>
     {}
   )
 
+// FEL fecha e.g. 2026-08-23T21:54:09-06:00 → keep Guatemala wall clock as 2026-08-23 21:54:09
+const formatFelFecha = fecha => {
+  if (!fecha) return null
+
+  const match = String(fecha).match(/^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})/)
+
+  return match ? `${match[1]} ${match[2]}` : null
+}
+
 // Stored datetimes are UTC wall-clock values without timezone marker (see getFormattedDates).
 // Do NOT change inserts; convert only when filtering/displaying for Guatemala (UTC-6).
 const GUATEMALA_TIMEZONE = 'America/Guatemala'
@@ -292,6 +301,9 @@ const GUATEMALA_UTC_OFFSET_HOURS = 6
 
 const toGuatemalaDateSql = field =>
   `DATE(DATE_SUB(${field}, INTERVAL ${GUATEMALA_UTC_OFFSET_HOURS} HOUR))`
+
+// documents.fact_date is already stored as Guatemala wall-clock (from FEL fecha).
+const toFactDateSql = field => `DATE(${field})`
 
 const decorate =
   (...functionsToDecorate) =>
@@ -430,11 +442,13 @@ module.exports = {
   getDocument,
   getError,
   getFormattedDates,
+  formatFelFecha,
   getWhereConditions,
   groupJoinResult,
   GUATEMALA_TIMEZONE,
   GUATEMALA_UTC_OFFSET_HOURS,
   toGuatemalaDateSql,
+  toFactDateSql,
   isEmail,
   isEmptyObject,
   validate,

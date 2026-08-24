@@ -37,6 +37,7 @@ const documentsStatus = {
   PENDING: 'PENDING',
   CANCELLED: 'CANCELLED',
   APPROVED: 'APPROVED',
+  SAT_FAILED: 'SAT_FAILED',
 }
 
 const inventoryMovementsStatus = {

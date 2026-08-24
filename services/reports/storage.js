@@ -1,4 +1,4 @@
-const { types, getWhereConditions, helpers, toGuatemalaDateSql } = require(`${process.env['FILE_ENVIRONMENT']}/globals`)
+const { types, getWhereConditions, helpers, toGuatemalaDateSql, toFactDateSql } = require(`${process.env['FILE_ENVIRONMENT']}/globals`)
 const { invoiceAdjustments } = helpers
 const { getDocumentNetAdjustmentSql } = invoiceAdjustments
 
@@ -32,7 +32,7 @@ const CLIENT_OVERDUE_DEBT_120_SUBQUERY = `
         CURDATE(),
         COALESCE(
           DATE(dc.credit_due_date),
-          DATE_ADD(${toGuatemalaDateSql('dc.updated_at')}, INTERVAL COALESCE(dc.credit_days, 0) DAY)
+          DATE_ADD(${toFactDateSql('dc.fact_date')}, INTERVAL COALESCE(dc.credit_days, 0) DAY)
         )
       ) > ${CLIENT_OVERDUE_DAYS_THRESHOLD}
   ) THEN 1 ELSE 0 END`
@@ -202,8 +202,8 @@ const getAccountsReceivable = (fields = {}) => {
   const whereConditions = rawWhereConditions
     .replace(/d.stakeholder_type/i, 's.stakeholder_type')
     .replace(/d.stakeholder_name/i, 's.name')
-    .replace(/d\.start_date/gi, toGuatemalaDateSql('d.updated_at'))
-    .replace(/d\.end_date/gi, toGuatemalaDateSql('d.updated_at'))
+    .replace(/d\.start_date/gi, toFactDateSql('d.fact_date'))
+    .replace(/d\.end_date/gi, toFactDateSql('d.fact_date'))
     .replace(/d\.credit_due_from/gi, toGuatemalaDateSql('d.credit_due_date'))
     .replace(/d\.credit_due_to/gi, toGuatemalaDateSql('d.credit_due_date'))
     .replace(/d\.credit_paid_from/gi, toGuatemalaDateSql('d.credit_paid_date'))
@@ -226,7 +226,7 @@ const getAccountsReceivable = (fields = {}) => {
       d.credit_status,
       d.paid_credit_amount,
       (d.total_amount - d.paid_credit_amount) AS unpaid_credit_amount,
-      d.updated_at AS document_date,
+      d.fact_date AS document_date,
       d.credit_due_date,
       d.credit_paid_date
     FROM documents d
@@ -266,8 +266,8 @@ const buildSalesReportQueryParts = (
     .replace(new RegExp(`${docAlias}\\.client_id`, 'gi'), `${stakeholderAlias}.id`)
     .replace(new RegExp(`AND ${docAlias}\\.document_type = 'INVOICES'`, 'gi'), '')
     .replace(new RegExp(`AND ${docAlias}\\.document_type = 'PRE_INVOICE'`, 'gi'), '')
-    .replace(new RegExp(`${docAlias}\\.start_date`, 'gi'), toGuatemalaDateSql(`${docAlias}.updated_at`))
-    .replace(new RegExp(`${docAlias}\\.end_date`, 'gi'), toGuatemalaDateSql(`${docAlias}.updated_at`))
+    .replace(new RegExp(`${docAlias}\\.start_date`, 'gi'), toFactDateSql(`${docAlias}.fact_date`))
+    .replace(new RegExp(`${docAlias}\\.end_date`, 'gi'), toFactDateSql(`${docAlias}.fact_date`))
     .replace(new RegExp(`${docAlias}\\.seller_id`, 'gi'), `${userAlias}.id`)
 
   const invoicesWhereConditions =
@@ -363,7 +363,7 @@ const getSales = (fields = {}) => {
       d.total_amount,
       d.uuid,
       d.paid_credit_amount,
-      d.updated_at AS created_at,
+      d.fact_date AS created_at,
       u.sales_commission,
       d.created_by AS seller_id,
       u.full_name AS seller_name
@@ -531,11 +531,11 @@ const buildInvoiceReportWhere = (fields = {}, docAlias = 'd', stakeholderAlias =
     .replace(new RegExp(`${docAlias}\\.name`, 'gi'), `${stakeholderAlias}.name`)
     .replace(
       new RegExp(`${docAlias}\\.updated_from`, 'gi'),
-      toGuatemalaDateSql(`${docAlias}.updated_at`)
+      toFactDateSql(`${docAlias}.fact_date`)
     )
     .replace(
       new RegExp(`${docAlias}\\.updated_to`, 'gi'),
-      toGuatemalaDateSql(`${docAlias}.updated_at`)
+      toFactDateSql(`${docAlias}.fact_date`)
     )
     .replace(new RegExp(`${docAlias}\\.start_date`, 'gi'), toGuatemalaDateSql(`${docAlias}.created_at`))
     .replace(new RegExp(`${docAlias}\\.end_date`, 'gi'), toGuatemalaDateSql(`${docAlias}.created_at`))
@@ -565,6 +565,7 @@ const getInvoice = (fields = {}) => {
       d.document_number,
       d.related_internal_document_id,
       d.uuid,
+      d.fact_date,
       d.document_type,
       d.stakeholder_id,
       s.name AS stakeholder_name,
@@ -578,6 +579,7 @@ const getInvoice = (fields = {}) => {
       CASE
         WHEN d.status = 'APPROVED' THEN 'APROBADO'
         WHEN d.status = 'CANCELLED' THEN 'ANULADO'
+        WHEN d.status = 'SAT_FAILED' THEN 'FALLO SAT'
             ELSE 'NO DISPONIBLE' END as status_spanish,
       d.cancel_reason,
       d.description,
@@ -592,6 +594,7 @@ const getInvoice = (fields = {}) => {
             ELSE 'NO DISPONIBLE' END as payment_method_spanish,
       d.credit_days,
       d.credit_status,
+      d.fact_date,
       d.created_at,
       d.created_by,
       d.updated_at,
@@ -679,8 +682,8 @@ const buildReceiptsReportWhere = (fields = {}, docAlias = 'd', stakeholderAlias 
   const whereConditions = rawWhereConditions
     .replace(new RegExp(`${docAlias}\\.nit`, 'gi'), `${stakeholderAlias}.nit`)
     .replace(new RegExp(`${docAlias}\\.name`, 'gi'), `${stakeholderAlias}.name`)
-    .replace(new RegExp(`${docAlias}\\.start_date`, 'gi'), toGuatemalaDateSql(`${docAlias}.updated_at`))
-    .replace(new RegExp(`${docAlias}\\.end_date`, 'gi'), toGuatemalaDateSql(`${docAlias}.updated_at`))
+    .replace(new RegExp(`${docAlias}\\.start_date`, 'gi'), toFactDateSql(`${docAlias}.fact_date`))
+    .replace(new RegExp(`${docAlias}\\.end_date`, 'gi'), toFactDateSql(`${docAlias}.fact_date`))
 
   return systemInvoice
     ? `${whereConditions} AND ${docAlias}.document_number IS NULL`
@@ -743,7 +746,7 @@ const getReceipts = (fields = {}) => {
         WHEN d.credit_status = 'PAID' THEN 'PAGADO'
         WHEN d.credit_status = 'DEFAULT' THEN 'EN MORA'
           ELSE 'NO DISPONIBLE' END as credit_status_spanish,
-      d.updated_at AS created_at,
+      d.fact_date AS created_at,
       d.created_by,
       d.updated_at,
       d.updated_by,
@@ -1000,6 +1003,7 @@ const getServiceOrders = (fields = {}) => {
     CASE
         WHEN d.status = 'PENDING' THEN 'PENDIENTE'
         WHEN d.status = 'CANCELLED' THEN 'ANULADO'
+        WHEN d.status = 'SAT_FAILED' THEN 'FALLO SAT'
         WHEN d.status = 'APPROVED' THEN 'APROBADO'
         ELSE 'NO DISPONIBLE' END as status_spanish,
     d.comments,
@@ -1137,8 +1141,8 @@ const buildSalesProductReportWhere = (fields = {}, itemType = null) => {
   return `${rawWhereConditions
     .replace(/d\.code/gi, 'prod.code')
     .replace(/d\.description/gi, 'prod.description')
-    .replace(/d\.start_date/gi, toGuatemalaDateSql('d.updated_at'))
-    .replace(/d\.end_date/gi, toGuatemalaDateSql('d.updated_at'))
+    .replace(/d\.start_date/gi, toFactDateSql('d.fact_date'))
+    .replace(/d\.end_date/gi, toFactDateSql('d.fact_date'))
     .replace(/d\.product_type/gi, 'prod.product_type')
     .replace(/d\.item_type/gi, SALES_ITEM_TYPE_SQL)
     .replace(/d\.sales_category/gi, 'prod.sales_category')}${buildItemTypeFilter(resolvedItemType)}`

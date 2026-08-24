@@ -4,8 +4,8 @@ const moment = require(`moment-timezone`)
 const mysql = require(`mysql2/promise`)
 const xml2js = require('xml2js')
 const { v4: uuidv4 } = require(`uuid`)
-const { buildXml,buildXmlFcam,handleRequest, handleResponse,handleRead,buidCancelXml,buildCreditDebitNote } = helpers
-const { createInvoiceFelLogDocument,findByDocumentId,parseToJson,createDebitCreditLogDocument,getDebitCreditNotes,getDebitCreditNotesCount,getDebitCreditNotesSummary,stripPaginationFields } = require('./storage')
+const { buildXml, buildXmlFcam, handleRequest, handleResponse, handleRead, buidCancelXml, buildCreditDebitNote, certifyInvoiceFel, getFelLogTimestamp } = helpers
+const { createInvoiceFelLogDocument, findByDocumentId, parseToJson, createDebitCreditLogDocument, getDebitCreditNotes, getDebitCreditNotesCount, getDebitCreditNotesSummary, stripPaginationFields } = require('./storage')
 const db = mysqlConfig(mysql)
 
 module.exports.create = async (event, context) => {
@@ -29,17 +29,22 @@ module.exports.create = async (event, context) => {
     if (!response && !response.data) throw new Error('The request to the SAT certification service has failed.')
 
     const { data } = response
-    const { cantidad_errores, serie, numero, xml_certificado,descripcion,uuid } = data
+    const { cantidad_errores, serie, numero, xml_certificado, descripcion, uuid, fecha } = data
+    const hasError = cantidad_errores > 0
+    const felTimestamp = getFelLogTimestamp(fecha, hasError)
 
     const dbValues = [
-      cantidad_errores > 0 ? '' : xml_certificado,
+      hasError ? '' : xml_certificado,
       xml,
-      cantidad_errores > 0 ? 'ERROR' : 'NO ERRORS',
+      hasError ? 'ERROR' : 'NO ERRORS',
       JSON.stringify(data),
-      cantidad_errores > 0 ? '' : numero,
-      cantidad_errores > 0 ? '' : serie,      
+      hasError ? '' : numero,
+      hasError ? '' : serie,
       body.invoice.created_by,
-      cantidad_errores > 0 ? '' : uuid,
+      hasError ? '' : uuid,
+      body.cabisa_document_id || null,
+      felTimestamp,
+      felTimestamp,
     ]
 
     const res = await db.transaction(async connection => {
@@ -103,17 +108,22 @@ module.exports.cancelDocument = async (event,context) => {
     if (!response && !response.data) throw new Error('The request to cancel the SAT certification service has failed.')
 
     const { data } = response
-    const { cantidad_errores, serie, numero, xml_certificado,descripcion,uuid } = data
+    const { cantidad_errores, serie, numero, xml_certificado, descripcion, uuid, fecha } = data
+    const hasError = cantidad_errores > 0
+    const felTimestamp = getFelLogTimestamp(fecha, hasError)
 
     const dbValues = [
-      cantidad_errores > 0 ? '' : xml_certificado,
+      hasError ? '' : xml_certificado,
       xml,
-      cantidad_errores > 0 ? 'ERROR' : 'CORRECT CANCELLATION',
+      hasError ? 'ERROR' : 'CORRECT CANCELLATION',
       JSON.stringify(data),
-      cantidad_errores > 0 ? '' : numero,
-      cantidad_errores > 0 ? '' : serie,      
+      hasError ? '' : numero,
+      hasError ? '' : serie,
       body.created_by,
-      cantidad_errores > 0 ? '' : uuid,
+      hasError ? '' : uuid,
+      body.cabisa_document_id || null,
+      felTimestamp,
+      felTimestamp,
     ]
 
     const res = await db.transaction(async connection => {
@@ -136,37 +146,19 @@ module.exports.createFactCam = async (event, context) => {
 
     if (!body) throw new Error('Missing body')
 
-    const xml = buildXmlFcam(body, moment)
-    console.log("XML FACTURA CAMBIARIA ",xml)
-    const response = await axios.post(process.env.CERTIFIER_URL, xml, {
-      headers: {
-        UsuarioFirma: process.env.SIGNATURE_USER_SAT,
-        LlaveFirma: process.env.SIGNATURE_KEY_SAT,
-        UsuarioApi: process.env.API_USER_SAT,
-        LlaveApi: process.env.API_KEY_SAT,
-        identificador: `${process.env.IDENTIFIER_SAT}${uuidv4()}`,
-      },
-    })
-
-    if (!response && !response.data) throw new Error('The request to the SAT certification service has failed.')
-
-    const { data } = response
-    const { cantidad_errores, serie, numero, xml_certificado,descripcion,uuid } = data
-
-    const dbValues = [
-      cantidad_errores > 0 ? '' : xml_certificado,
-      xml,
-      cantidad_errores > 0 ? 'ERROR' : 'NO ERRORS',
-      JSON.stringify(data),
-      cantidad_errores > 0 ? '' : numero,
-      cantidad_errores > 0 ? '' : serie,      
-      body.invoice.created_by,
-      cantidad_errores > 0 ? '' : uuid,
-    ]
-
     const res = await db.transaction(async connection => {
-      await connection.query(createInvoiceFelLogDocument(), dbValues, false)      
-      return { statusCode: 201, data, message:  (cantidad_errores > 0 ? descripcion :'SUCCESSFUL') }
+      const result = await certifyInvoiceFel({
+        connection,
+        cabisaDocumentId: body.cabisa_document_id || null,
+        billData: body,
+        createdBy: body.invoice.created_by,
+      })
+
+      return {
+        statusCode: result.success ? 201 : 400,
+        data: result.data,
+        message: result.message,
+      }
     })
 
     return await handleResponse({ req: {}, res })

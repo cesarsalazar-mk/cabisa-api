@@ -22,6 +22,12 @@ provider:
     DATABASE_USER: ${file(${self:custom.config}):dbUser}
     DATABASE_NAME: ${file(${self:custom.config}):dbName}
     DATABASE_PASSWORD: ${file(${self:custom.config}):dbPassword}
+    CERTIFIER_URL: ${file(${self:custom.config}):certifierUrl}
+    SIGNATURE_USER_SAT: ${file(${self:custom.config}):signatureUserSat}
+    SIGNATURE_KEY_SAT: ${file(${self:custom.config}):signatureKeySat}
+    API_USER_SAT: ${file(${self:custom.config}):apiUserSat}
+    API_KEY_SAT: ${file(${self:custom.config}):apiKeySat}
+    IDENTIFIER_SAT: ${file(${self:custom.config}):identifierSat}
 
 package:
   exclude:
@@ -85,6 +91,17 @@ functions:
       - http:
           path: sales/cancel
           method: put
+          cors: true
+    layers:
+      - arn:${file(${self:custom.config}):layer}
+
+  salesCertify:
+    handler: handler.certify
+    timeout: 30
+    events:
+      - http:
+          path: sales/{document_id}/certify
+          method: post
           cors: true
     layers:
       - arn:${file(${self:custom.config}):layer}

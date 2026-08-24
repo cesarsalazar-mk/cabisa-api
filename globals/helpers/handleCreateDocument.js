@@ -1,5 +1,5 @@
 const { creditsPolicy, documentsTypes } = require('../types')
-const { getFormattedDates } = require('../common')
+const { getFormattedDates, formatFelFecha } = require('../common')
 // res.excludeProductOnCreateDetail: product_id
 // res.calculateSalesCommission: boolean
 // res.saveInventoryUnitValueAsProductPrice: boolean
@@ -58,7 +58,8 @@ const handleCreateDocument = async (req, res) => {
     serie = null,
     document_number = null,
     uuid = null,
-    created_at = null
+    created_at = null,
+    fact_date = null,
   } = req.body
   
   const related_internal_document_id = document_id
@@ -69,6 +70,7 @@ const handleCreateDocument = async (req, res) => {
   const { created_at: resolvedCreatedAt } = getFormattedDates({
     created_at: created_at || new Date().toISOString(),
   })
+  const resolvedFactDate = formatFelFecha(fact_date)
 
   const isInvoiceOrPreInvoice = () =>
     document_type === documentsTypes.SELL_INVOICE ||
@@ -102,7 +104,9 @@ const handleCreateDocument = async (req, res) => {
     serie,
     document_number,
     uuid,
-    resolvedCreatedAt
+    resolvedCreatedAt,
+    resolvedFactDate,
+    related_internal_document_id,
   ]})
   
   const newDocumentId = await res.connection.geLastInsertId()
@@ -159,9 +163,11 @@ const createDocument = () => `
       serie,
       document_number,
       uuid,
-      created_at
+      created_at,
+      fact_date,
+      related_internal_document_id
     )
-  VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `
 const createDocumentsProducts = valuesArray => `
   INSERT INTO documents_products
