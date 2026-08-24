@@ -8,6 +8,7 @@ const {
   validators,
   ValidatorException,
   getDocument,
+  groupJoinResult,
 } = require(`${process.env['FILE_ENVIRONMENT']}/globals`)
 const storage = require('./storage')
 const {
@@ -30,9 +31,80 @@ const {
   handleUpdateCreditPaidDate,
   handleUpdateDocumentPaidAmount,
   invoiceAdjustments,
+  buildInvoiceFelPayload,
+  certifyInvoiceFel,
+  validateInvoiceBusinessRules,
+  finalizeExistingSellInvoice,
+  applyFelCertificationToDocument,
 } = helpers
 const { parentChildProductsValidator } = validators
 const db = mysqlConfig(mysql)
+
+const draftInvoiceInputType = {
+  stakeholder_id: { type: ['string', 'number'], required: true },
+  payment_method: { type: { enum: types.paymentMethods }, required: true },
+  project_id: { type: ['string', 'number'], required: true },
+  credit_days: { type: { enum: types.creditsPolicy.creditDaysEnum } },
+  subtotal_amount: { type: 'number', min: 1, required: true },
+  total_discount_amount: { type: 'number', required: true },
+  total_tax_amount: { type: 'number', required: true },
+  total_amount: { type: 'number', min: 0, required: true },
+  related_external_document_id: { type: ['string', 'number'] },
+  description: { type: 'string' },
+  products: {
+    type: 'array',
+    required: true,
+    fields: {
+      type: 'object',
+      fields: {
+        product_id: { type: ['string', 'number'], required: true },
+        service_type: { type: { enum: types.documentsServiceType }, required: true },
+        product_quantity: { type: 'number', min: 0, required: true },
+        product_price: { type: 'number', min: 0 },
+        product_discount_percentage: { type: 'number', min: 0 },
+        product_discount: { type: 'number', min: 0 },
+        parent_product_id: { type: ['string', 'number'] },
+      },
+    },
+  },
+  created_at: { type: ['string', 'number'], required: false },
+}
+
+const loadInvoiceForCertify = async documentId => {
+  const rawDocument = await db.query(
+    storage.findDocumentForCertify([types.documentsTypes.SELL_INVOICE, types.documentsTypes.RENT_INVOICE]),
+    [documentId]
+  )
+  const [document] = groupJoinResult({
+    data: rawDocument,
+    nestedFieldsKeys: ['products'],
+    uniqueKey: ['document_id'],
+  })
+
+  if (!document) return null
+
+  const [stakeholder] = document.stakeholder_id
+    ? await db.query(commonStorage.findStakeholder({ id: document.stakeholder_id }))
+    : []
+
+  return { document, stakeholder }
+}
+
+const buildCertifyRequestBody = (document, products) => ({
+  document_id: document.document_id,
+  stakeholder_id: document.stakeholder_id,
+  project_id: document.project_id,
+  payment_method: document.payment_method,
+  credit_days: document.credit_days,
+  subtotal_amount: document.subtotal_amount,
+  total_discount_amount: document.total_discount_amount,
+  total_tax_amount: document.total_tax_amount,
+  total_amount: document.total_amount,
+  description: document.description,
+  related_internal_document_id: document.related_internal_document_id,
+  related_external_document_id: document.related_external_document_id,
+  products,
+})
 
 module.exports.readServiceVersion = async () => {
   try {
@@ -185,6 +257,7 @@ module.exports.create = async event => {
     serie: { type: ['string', 'number'], required: true },
     document_number: { type: ['string', 'number'], required: true },
     uuid: { type: ['string', 'number'], required: true },
+    fact_date: { type: ['string', 'number'], required: false },
     created_at: { type: ['string', 'number'], required: false },
   }
 
@@ -567,6 +640,271 @@ module.exports.update = async event => {
     })
 
     return await handleResponse({ req, res })
+  } catch (error) {
+    console.log(error)
+    return await handleResponse({ error })
+  }
+}
+
+module.exports.draft = async event => {
+  try {
+    const req = await handleRequest({ event, inputType: draftInvoiceInputType })
+    req.hasPermissions([types.permissions.INVOICES])
+
+    const { products, total_amount } = req.body
+    const { productsFromDB } = await validateInvoiceBusinessRules({
+      body: req.body,
+      dbQuery: db.query,
+      commonStorage,
+      storage,
+    })
+
+    const productsWithTaxes = calculateProductTaxes(products, productsFromDB)
+
+    const res = await db.transaction(async connection => {
+      const stakeholderCreated = await handleCreateStakeholder(
+        { ...req, body: { ...req.body, products: productsWithTaxes } },
+        { connection }
+      )
+
+      const initDocumentCreated = await handleCreateDocument(
+        {
+          ...stakeholderCreated.req,
+          body: {
+            ...stakeholderCreated.req.body,
+            document_type: types.documentsTypes.SELL_PRE_INVOICE,
+          },
+        },
+        stakeholderCreated.res
+      )
+
+      const finishDocumentCreated = await handleCreateDocument(
+        {
+          ...initDocumentCreated.req,
+          body: {
+            ...initDocumentCreated.req.body,
+            document_type: types.documentsTypes.SELL_INVOICE,
+          },
+        },
+        { ...initDocumentCreated.res, calculateSalesCommission: true }
+      )
+
+      return {
+        statusCode: 201,
+        data: {
+          document_id: finishDocumentCreated.res.data.document_id,
+          status: types.documentsStatus.PENDING,
+          total_amount,
+        },
+        message: 'Borrador de factura creado exitosamente',
+      }
+    })
+
+    return await handleResponse({ req, res })
+  } catch (error) {
+    console.log(error)
+    return await handleResponse({ error })
+  }
+}
+
+module.exports.certify = async event => {
+  try {
+    const req = await handleRequest({ event })
+    req.hasPermissions([types.permissions.INVOICES])
+
+    const documentId = req.pathParameters?.document_id || req.body?.document_id
+    const errors = []
+
+    if (!documentId) errors.push('El campo document_id es requerido')
+
+    if (errors.length > 0) throw new ValidatorException(errors)
+
+    const loaded = await loadInvoiceForCertify(documentId)
+
+    if (!loaded?.document) throw new ValidatorException(['La factura no se encuentra registrada'])
+
+    const { document, stakeholder } = loaded
+
+    if (document.status === types.documentsStatus.CANCELLED) {
+      throw new ValidatorException(['No se puede certificar una factura cancelada'])
+    }
+
+    if (document.status === types.documentsStatus.APPROVED) {
+      return await handleResponse({
+        req,
+        res: {
+          statusCode: 200,
+          data: {
+            document_id: document.document_id,
+            status: document.status,
+            uuid: document.uuid,
+            serie: document.serie,
+            document_number: document.document_number,
+            fact_date: document.fact_date,
+            already_certified: true,
+          },
+          message: 'La factura ya se encuentra certificada',
+        },
+      })
+    }
+
+    if (
+      document.status !== types.documentsStatus.PENDING &&
+      document.status !== types.documentsStatus.SAT_FAILED
+    ) {
+      throw new ValidatorException([`La factura no puede certificarse en estado ${document.status}`])
+    }
+
+    const certifyBody = buildCertifyRequestBody(document, document.products)
+    const { stakeholderIdExists, totalCredit, productsFromDB } = await validateInvoiceBusinessRules({
+      body: certifyBody,
+      dbQuery: db.query,
+      commonStorage,
+      storage,
+    })
+
+    // Inventory movements need product_type, stock and inventory costs, which the
+    // document query does not return.
+    certifyBody.products = calculateProductTaxes(document.products, productsFromDB)
+
+    const hasFelData = Boolean(document.uuid && document.document_number && document.serie)
+    let felResult = null
+    let certifyBodyWithFel = { ...certifyBody }
+
+    if (!hasFelData) {
+      const billData = buildInvoiceFelPayload({
+        document,
+        stakeholder,
+        products: document.products,
+      })
+
+      try {
+        felResult = await db.transaction(async connection =>
+          certifyInvoiceFel({
+            connection,
+            cabisaDocumentId: document.document_id,
+            billData,
+            createdBy: document.created_by || req.currentUser.userName || 'system',
+          })
+        )
+      } catch (felError) {
+        await db.transaction(async connection => {
+          await connection.query(commonStorage.updateDocumentStatus(), [
+            types.documentsStatus.SAT_FAILED,
+            req.currentUser.user_id,
+            document.document_id,
+          ])
+        })
+
+        return await handleResponse({
+          req,
+          res: {
+            statusCode: 400,
+            data: {
+              document_id: document.document_id,
+              status: types.documentsStatus.SAT_FAILED,
+            },
+            message: felError.message || 'Error al certificar con SAT',
+          },
+        })
+      }
+
+      if (!felResult.success) {
+        await db.transaction(async connection => {
+          await connection.query(commonStorage.updateDocumentStatus(), [
+            types.documentsStatus.SAT_FAILED,
+            req.currentUser.user_id,
+            document.document_id,
+          ])
+        })
+
+        return await handleResponse({
+          req,
+          res: {
+            statusCode: 400,
+            data: {
+              document_id: document.document_id,
+              status: types.documentsStatus.SAT_FAILED,
+              fel: felResult.data,
+            },
+            message: felResult.message,
+          },
+        })
+      }
+
+      await db.transaction(async connection => {
+        await applyFelCertificationToDocument({
+          connection,
+          documentId: document.document_id,
+          felData: felResult.data,
+          updatedBy: req.currentUser.user_id,
+          status: types.documentsStatus.PENDING,
+        })
+      })
+
+      certifyBodyWithFel = {
+        ...certifyBody,
+        serie: felResult.data.serie,
+        document_number: felResult.data.numero,
+        uuid: felResult.data.uuid,
+        fact_date: felResult.data.fecha,
+      }
+    }
+
+    try {
+      const res = await db.transaction(async connection => {
+        const finalized = await finalizeExistingSellInvoice({
+          req: { ...req, body: certifyBodyWithFel },
+          body: certifyBodyWithFel,
+          connection,
+          stakeholderIdExists,
+          totalCredit,
+        })
+
+        return {
+          statusCode: 200,
+          data: {
+            document_id: document.document_id,
+            status: types.documentsStatus.APPROVED,
+            uuid: certifyBodyWithFel.uuid || document.uuid,
+            serie: certifyBodyWithFel.serie || document.serie,
+            document_number: certifyBodyWithFel.document_number || document.document_number,
+            fact_date: certifyBodyWithFel.fact_date || document.fact_date,
+            fel: felResult?.data || null,
+            operation_id: finalized.res.data,
+          },
+          message: 'Factura certificada exitosamente',
+        }
+      })
+
+      return await handleResponse({ req, res })
+    } catch (finalizeError) {
+      await db.transaction(async connection => {
+        await connection.query(commonStorage.updateDocumentStatus(), [
+          types.documentsStatus.SAT_FAILED,
+          req.currentUser.user_id,
+          document.document_id,
+        ])
+      })
+
+      return await handleResponse({
+        req,
+        res: {
+          statusCode: 400,
+          data: {
+            document_id: document.document_id,
+            status: types.documentsStatus.SAT_FAILED,
+            uuid: certifyBodyWithFel.uuid || document.uuid,
+            serie: certifyBodyWithFel.serie || document.serie,
+            document_number: certifyBodyWithFel.document_number || document.document_number,
+            fel_certified: Boolean(certifyBodyWithFel.uuid || document.uuid),
+          },
+          message:
+            finalizeError.message ||
+            'La factura fue certificada en SAT pero no se pudo completar el registro en Cabisa. Reintente la certificacion.',
+        },
+      })
+    }
   } catch (error) {
     console.log(error)
     return await handleResponse({ error })

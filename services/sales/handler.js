@@ -31,6 +31,9 @@ const {
   handleUpdateCreditPaidDate,
   handleUpdateCreditDueDate,
   handleUpdateDocumentPaidAmount,
+  buildInvoiceFelPayload,
+  certifyInvoiceFel,
+  applyFelCertificationToDocument,
 } = helpers
 const { parentChildProductsValidator } = validators
 const db = mysqlConfig(mysql)
@@ -426,6 +429,7 @@ module.exports.invoice = async event => {
     serie: { type: ['string', 'number'], required: true },
     document_number: { type: ['string', 'number'], required: true },
     uuid: { type: ['string', 'number'], required: true },
+    fact_date: { type: ['string', 'number'], required: false },
   }
 
   try {
@@ -694,6 +698,190 @@ module.exports.cancel = async event => {
     })
 
     return await handleResponse({ req, res })
+  } catch (error) {
+    console.log(error)
+    return await handleResponse({ error })
+  }
+}
+
+module.exports.certify = async event => {
+  try {
+    const req = await handleRequest({ event })
+    req.hasPermissions([types.permissions.SALES])
+
+    const documentId = req.pathParameters?.document_id || req.body?.document_id
+    if (!documentId) throw new ValidatorException(['El campo document_id es requerido'])
+
+    const preInvoiceDetails = await db.query(
+      commonStorage.findDocument([types.documentsTypes.SELL_PRE_INVOICE, types.documentsTypes.RENT_PRE_INVOICE]),
+      [documentId]
+    )
+
+    if (!preInvoiceDetails || !preInvoiceDetails[0]) {
+      throw new ValidatorException(['La nota de servicio no se encuentra registrada'])
+    }
+
+    const [groupedPreInvoice] = groupJoinResult({
+      data: preInvoiceDetails,
+      nestedFieldsKeys: ['products'],
+      uniqueKey: ['document_id'],
+    })
+
+    if (groupedPreInvoice.document_status === types.documentsStatus.CANCELLED) {
+      throw new ValidatorException(['La nota de servicio se encuentra cancelada'])
+    }
+
+    if (groupedPreInvoice.related_internal_document_id) {
+      throw new ValidatorException([`La nota de servicio ya tiene una factura asociada (id: ${groupedPreInvoice.related_internal_document_id})`])
+    }
+
+    const [stakeholder] = groupedPreInvoice.stakeholder_id
+      ? await db.query(commonStorage.findStakeholder({ id: groupedPreInvoice.stakeholder_id }))
+      : []
+
+    const productsWithTaxes = calculateProductTaxes(
+      groupedPreInvoice.products,
+      groupedPreInvoice.products
+    )
+    const operation_type = groupedPreInvoice.operation_type || types.operationsTypes.SELL
+    const document_type = config[operation_type].finish.documentType
+
+    let invoiceId = null
+    await db.transaction(async connection => {
+      const documentCreated = await handleCreateDocument(
+        {
+          ...req,
+          body: {
+            ...groupedPreInvoice,
+            ...req.body,
+            document_id: documentId,
+            products: productsWithTaxes,
+            document_type,
+            operation_type,
+            payment_method: req.body.payment_method || groupedPreInvoice.payment_method || 'CASH',
+          },
+        },
+        { connection, calculateSalesCommission: true }
+      )
+
+      invoiceId = documentCreated.res.data.document_id
+    })
+
+    const billData = buildInvoiceFelPayload({
+      document: { ...groupedPreInvoice, created_by: req.currentUser.userName || 'system', credit_days: groupedPreInvoice.credit_days },
+      stakeholder,
+      products: groupedPreInvoice.products,
+    })
+
+    let felResult = null
+    try {
+      felResult = await db.transaction(async connection =>
+        certifyInvoiceFel({
+          connection,
+          cabisaDocumentId: invoiceId,
+          billData,
+          createdBy: req.currentUser.userName || 'system',
+        })
+      )
+    } catch (felError) {
+      await db.transaction(async connection => {
+        await connection.query(commonStorage.updateDocumentStatus(), [types.documentsStatus.SAT_FAILED, req.currentUser.user_id, invoiceId])
+      })
+      return await handleResponse({
+        req,
+        res: { statusCode: 400, data: { document_id: invoiceId, status: types.documentsStatus.SAT_FAILED }, message: felError.message || 'Error al certificar con SAT' },
+      })
+    }
+
+    if (!felResult.success) {
+      await db.transaction(async connection => {
+        await connection.query(commonStorage.updateDocumentStatus(), [types.documentsStatus.SAT_FAILED, req.currentUser.user_id, invoiceId])
+      })
+      return await handleResponse({
+        req,
+        res: { statusCode: 400, data: { document_id: invoiceId, status: types.documentsStatus.SAT_FAILED, fel: felResult.data }, message: felResult.message },
+      })
+    }
+
+    await db.transaction(async connection => {
+      await applyFelCertificationToDocument({
+        connection,
+        documentId: invoiceId,
+        felData: felResult.data,
+        updatedBy: req.currentUser.user_id,
+        status: types.documentsStatus.PENDING,
+      })
+    })
+
+    try {
+      const { res } = await db.transaction(async connection => {
+        const stakeholderCreditUpdated = await handleUpdateStakeholderCredit(
+          {
+            ...req,
+            body: {
+              ...groupedPreInvoice,
+              document_id: invoiceId,
+              related_internal_document_id: documentId,
+              products: productsWithTaxes,
+              total_credit: Number(stakeholder.total_credit) - Number(groupedPreInvoice.total_amount) + Number(groupedPreInvoice.total_amount),
+              paid_credit: Number(stakeholder.paid_credit),
+            },
+          },
+          { connection }
+        )
+
+        if (groupedPreInvoice.credit_days) {
+          await handleUpdateCreditDueDate(
+            { ...stakeholderCreditUpdated.req, body: { ...stakeholderCreditUpdated.req.body, credit_days: groupedPreInvoice.credit_days } },
+            stakeholderCreditUpdated.res
+          )
+        }
+
+        const documentApproved = await handleApproveDocument(stakeholderCreditUpdated.req, stakeholderCreditUpdated.res)
+
+        const inventoryMovementsCreated = await handleCreateInventoryMovements(documentApproved.req, {
+          ...documentApproved.res,
+          onCreateMovementType: config[operation_type]?.finish?.movementType || types.inventoryMovementsTypes.OUT,
+        })
+
+        const inventoryMovementsApproved = await handleApproveInventoryMovements(
+          inventoryMovementsCreated.req,
+          inventoryMovementsCreated.res
+        )
+
+        return await handleUpdateStock(inventoryMovementsApproved.req, {
+          ...inventoryMovementsApproved.res,
+          updateStockOn: types.actions.APPROVED,
+        })
+      })
+
+      return await handleResponse({
+        req,
+        res: {
+          statusCode: 200,
+          data: {
+            document_id: invoiceId,
+            status: types.documentsStatus.APPROVED,
+            uuid: felResult.data.uuid,
+            serie: felResult.data.serie,
+            document_number: felResult.data.numero,
+          },
+          message: 'Factura certificada exitosamente',
+        },
+      })
+    } catch (finalizeError) {
+      await db.transaction(async connection => {
+        await connection.query(commonStorage.updateDocumentStatus(), [types.documentsStatus.SAT_FAILED, req.currentUser.user_id, invoiceId])
+      })
+      return await handleResponse({
+        req,
+        res: {
+          statusCode: 400,
+          data: { document_id: invoiceId, status: types.documentsStatus.SAT_FAILED },
+          message: 'La factura fue certificada en SAT pero no se pudo completar. Reintente la certificacion.',
+        },
+      })
+    }
   } catch (error) {
     console.log(error)
     return await handleResponse({ error })

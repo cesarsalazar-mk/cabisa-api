@@ -194,6 +194,41 @@ const findDocumentProduct = () => `
   WHERE d.id = ?
 `
 
+const createFelLogDocument = () => `
+  INSERT INTO log_documents (
+    response_pdf,
+    request,
+    error,
+    response_json,
+    document_id,
+    serie,
+    created_by,
+    uuid,
+    cabisa_document_id,
+    create_at,
+    update_at
+  )
+  VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`
+
+const updateDocumentStatus = () => `
+  UPDATE documents
+  SET status = ?, updated_by = ?
+  WHERE id = ?
+`
+
+const updateDocumentFelCertification = () => `
+  UPDATE documents
+  SET
+    serie = ?,
+    document_number = ?,
+    uuid = ?,
+    fact_date = ?,
+    status = ?,
+    updated_by = ?
+  WHERE id = ?
+`
+
 module.exports = {
   findProducts,
   findStakeholder,
@@ -201,4 +236,7 @@ module.exports = {
   findDocumentMovements,
   findDocumentProduct,
   updateProductsInventoryCosts,
+  createFelLogDocument,
+  updateDocumentStatus,
+  updateDocumentFelCertification,
 }
