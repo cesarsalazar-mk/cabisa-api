@@ -808,6 +808,65 @@ const getReceipts = (fields = {}) => {
   `
 }
 
+const getReceiptsExport = (fields = {}) => {
+  const whereConditions = buildReceiptsReportWhere(fields)
+  const paginationSQL = buildPaginationSQL(fields)
+  const paginationSubquery = paginationSQL
+    ? `
+    AND d.id IN (
+      SELECT id FROM (
+        SELECT d2.id
+        FROM documents d2
+        LEFT JOIN stakeholders s2 ON s2.id = d2.stakeholder_id
+        WHERE ${getInvoiceTypeCondition('d2')}
+        AND d2.status = 'APPROVED'
+        ${buildReceiptsReportWhere(fields, 'd2', 's2')}
+        ORDER BY d2.id DESC
+        ${paginationSQL}
+      ) AS paginated_documents
+    )`
+    : ''
+
+  return `
+    SELECT
+      d.id,
+      d.uuid,
+      d.document_number,
+      d.related_internal_document_id,
+      s.name AS stakeholder_name,
+      d.total_amount,
+      d.fact_date AS created_at,
+      COALESCE((
+        SELECT SUM(p.payment_amount)
+        FROM payments p
+        WHERE p.document_id = d.id AND (p.is_deleted = 0 OR p.is_deleted IS NULL)
+      ), 0) AS due
+    FROM documents d
+    LEFT JOIN stakeholders s ON s.id = d.stakeholder_id
+    WHERE ${getInvoiceTypeCondition('d')}
+    ${whereConditions}
+    AND d.status = 'APPROVED'
+    ${paginationSubquery}
+    ORDER BY d.id DESC
+  `
+}
+
+const getReceiptsExportProductLines = (documentIds = []) => {
+  const placeholders = documentIds.map(() => '?').join(', ')
+
+  return `
+    SELECT
+      dp.document_id,
+      prod.id AS product_id,
+      dp.parent_product_id,
+      prod.description
+    FROM documents_products dp
+    LEFT JOIN products prod ON prod.id = dp.product_id
+    WHERE dp.document_id IN (${placeholders})
+    ORDER BY dp.document_id, dp.id
+  `
+}
+
 const getReceiptsCount = (fields = {}) => `
   SELECT COUNT(*) AS total
   FROM documents d
@@ -1067,6 +1126,70 @@ const getServiceOrders = (fields = {}) => {
   `
 }
 
+const getServiceOrdersExport = (fields = {}) => {
+  const whereConditions = buildServiceOrdersReportWhere(fields)
+  const paginationSQL = buildPaginationSQL(fields)
+  const paginationSubquery = paginationSQL
+    ? `
+    AND d.id IN (
+      SELECT id FROM (
+        SELECT d2.id
+        FROM documents d2
+        INNER JOIN stakeholders s2 ON s2.id = d2.stakeholder_id
+        WHERE d2.document_type = '${types.documentsTypes.RENT_PRE_INVOICE}'
+        ${buildServiceOrdersReportWhere(fields, 'd2', 's2')}
+        ORDER BY d2.id DESC
+        ${paginationSQL}
+      ) AS paginated_service_orders
+    )`
+    : ''
+
+  return `
+  SELECT
+    d.id,
+    d.comments,
+    s.name AS stakeholder_name,
+    proj.name AS project_name,
+    proj.start_date AS project_start_date
+  FROM documents d
+  INNER JOIN users u ON u.id = d.created_by
+  INNER JOIN stakeholders s ON s.id = d.stakeholder_id
+  INNER JOIN projects proj ON proj.id = d.project_id
+  WHERE d.document_type = '${types.documentsTypes.RENT_PRE_INVOICE}'
+  AND EXISTS (
+    SELECT 1 FROM documents_products dp WHERE dp.document_id = d.id
+  )
+  ${whereConditions}
+  ${paginationSubquery}
+  ORDER BY d.id DESC
+  `
+}
+
+const getServiceOrdersExportProductLines = (documentIds = []) => {
+  const placeholders = documentIds.map(() => '?').join(', ')
+
+  return `
+    SELECT
+      dp.document_id,
+      prod.id AS product_id,
+      dp.parent_product_id,
+      prod.code,
+      prod.description,
+      CASE
+        WHEN dp.service_type = 'EQUIPMENT' THEN 'EQUIPO'
+        WHEN dp.service_type = 'SERVICE' THEN 'SERVICIO'
+        WHEN dp.service_type = 'PART' THEN 'REPUESTO'
+        ELSE 'NO DISPONIBLE'
+      END AS service_type_spanish,
+      (dp.unit_tax_amount + dp.product_price) AS total_product_amount,
+      dp.product_quantity AS quantity
+    FROM documents_products dp
+    INNER JOIN products prod ON prod.id = dp.product_id
+    WHERE dp.document_id IN (${placeholders})
+    ORDER BY dp.document_id, dp.id
+  `
+}
+
 const getServiceOrdersCount = (fields = {}) => `
   SELECT COUNT(*) AS total
   FROM documents d
@@ -1250,6 +1373,8 @@ module.exports = {
   getInvoiceSummary,
   getInvoiceSummaryRows,
   getReceipts,
+  getReceiptsExport,
+  getReceiptsExportProductLines,
   getReceiptsCount,
   getReceiptsSummary,
   getReceiptSummaryRows,
@@ -1258,6 +1383,8 @@ module.exports = {
   getManualReceiptsCount,
   getManualReceiptsSummary,
   getServiceOrders,
+  getServiceOrdersExport,
+  getServiceOrdersExportProductLines,
   getServiceOrdersCount,
   getServiceOrdersSummary,
   getSalesProductReport,

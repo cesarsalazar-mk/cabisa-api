@@ -21,6 +21,124 @@ const applyAdjustedExportValues = rows =>
     }
   })
 
+const EXPORT_IN_CHUNK_SIZE = 500
+
+const chunkArray = (items, size) => {
+  const chunks = []
+
+  for (let i = 0; i < items.length; i += size) {
+    chunks.push(items.slice(i, i + size))
+  }
+
+  return chunks
+}
+
+const getReceiptsProductDescriptions = async documentIds => {
+  const uniqueIds = [...new Set((documentIds || []).filter(Boolean))]
+
+  if (!uniqueIds.length) return {}
+
+  const rows = []
+
+  for (const chunk of chunkArray(uniqueIds, EXPORT_IN_CHUNK_SIZE)) {
+    const chunkRows = await db.query(storage.getReceiptsExportProductLines(chunk), chunk)
+    rows.push(...(chunkRows || []))
+  }
+
+  const descriptionsByDocumentId = {}
+  const seen = {}
+
+  rows.forEach(row => {
+    const key = `${row.document_id}:${row.product_id}:${row.parent_product_id}`
+
+    if (seen[key] || !row.description) return
+
+    seen[key] = true
+    const documentId = String(row.document_id)
+
+    descriptionsByDocumentId[documentId] = descriptionsByDocumentId[documentId]
+      ? `${descriptionsByDocumentId[documentId]}  ||  ${row.description}`
+      : row.description
+  })
+
+  return descriptionsByDocumentId
+}
+
+const mapCashReceiptsExportRows = async documents => {
+  const rows = Array.isArray(documents) ? documents : []
+  const descriptionsByDocumentId = await getReceiptsProductDescriptions(
+    rows.map(document => document.id)
+  )
+
+  return rows.map(document => ({
+    ...document,
+    due: Number(document.due) || 0,
+    document_number:
+      document.document_number === null ? 'Factura del sistema' : document.document_number,
+    producto_lit: descriptionsByDocumentId[String(document.id)] || '',
+  }))
+}
+
+const toCashReceiptsExcelRows = rows =>
+  rows.map(row => ({
+    related_internal_document_id: row.related_internal_document_id,
+    document_number: row.document_number,
+    created_at: row.created_at,
+    stakeholder_name: row.stakeholder_name,
+    differenceAmount: row.differenceAmount,
+    total_amount: row.total_amount,
+    producto_lit: row.producto_lit || '',
+  }))
+
+const getServiceOrdersProductsByDocumentIds = async documentIds => {
+  const uniqueIds = [...new Set((documentIds || []).filter(Boolean))]
+
+  if (!uniqueIds.length) return {}
+
+  const rows = []
+
+  for (const chunk of chunkArray(uniqueIds, EXPORT_IN_CHUNK_SIZE)) {
+    const chunkRows = await db.query(storage.getServiceOrdersExportProductLines(chunk), chunk)
+    rows.push(...(chunkRows || []))
+  }
+
+  const productsByDocumentId = {}
+  const seen = {}
+
+  rows.forEach(row => {
+    const key = `${row.document_id}:${row.product_id}:${row.parent_product_id}`
+
+    if (seen[key]) return
+
+    seen[key] = true
+    const documentId = String(row.document_id)
+
+    if (!productsByDocumentId[documentId]) productsByDocumentId[documentId] = []
+
+    productsByDocumentId[documentId].push({
+      code: row.code,
+      description: row.description,
+      service_type_spanish: row.service_type_spanish,
+      total_product_amount: row.total_product_amount,
+      quantity: row.quantity,
+    })
+  })
+
+  return productsByDocumentId
+}
+
+const mapServiceOrdersExportRows = async documents => {
+  const rows = Array.isArray(documents) ? documents : []
+  const productsByDocumentId = await getServiceOrdersProductsByDocumentIds(
+    rows.map(document => document.id)
+  )
+
+  return rows.map(document => ({
+    ...document,
+    products: productsByDocumentId[String(document.id)] || [],
+  }))
+}
+
 module.exports.clientsAccountState = async event => {
   try {
     const req = await handleRequest({ event })
@@ -557,47 +675,9 @@ module.exports.exportReport = async event => {
         ]
         break;
       case "cashReceipts":
-        result = await handleRead(req, { dbQuery: db.query, storage: storage.getReceipts, nestedFieldsKeys: ['products', 'payments'] })        
-        result.data = result.data[0]
-      ? result.data.map(d => 
-        {
-          let composeData = { 
-          ...d,
-          discount_percentage: d.products[0].discount_percentage,          
-          due: d.payments && d.payments[0] ? d.payments.reduce((r, p) => {
-            const isDuplicate = r[0] && r.some(rp => Number(rp.payment_id) === Number(p.payment_id))
+        result = await handleRead(req, { dbQuery: db.query, storage: storage.getReceiptsExport })
+        result.data = await mapCashReceiptsExportRows(result.data)
 
-            if (isDuplicate || !p.payment_id || p.is_deleted) return r
-            else return [...r, p]
-          }, []).filter(item => item.is_deleted === 0).reduce((sum ,{payment_amount}) => sum + payment_amount , 0) : 0,
-          products:
-            d.products && d.products[0]
-              ? d.products.reduce((r, p) => {
-                  const isDuplicate =
-                    r[0] && r.some(rp => Number(rp.id) === Number(p.id) && Number(rp.parent_product_id) === Number(p.parent_product_id))
-
-                  if (isDuplicate) return r
-                  else return [...r, p]
-                }, [])
-              : [],
-          payments:
-            d.payments && d.payments[0]
-              ? d.payments.reduce((r, p) => {
-                  const isDuplicate = r[0] && r.some(rp => Number(rp.payment_id) === Number(p.payment_id))
-
-                  if (isDuplicate || !p.payment_id || p.is_deleted) return r
-                  else return [...r, p]
-                }, [])
-              : [],
-        }
-
-        composeData.differenceAmount = composeData.total_amount - composeData.due
-        composeData.document_number = composeData.document_number === null ? 'Factura del sistema' : composeData.document_number                
-        console.log("composeData >>", composeData)
-        return composeData
-      })
-      : []  
-      
         manifestoHeaders = [
           { name: 'Nro. Nota de servicio', column: 'related_internal_document_id', width: 18 },
           { name: 'Nro. Documento', column: 'document_number', width: 17 },                    
@@ -606,22 +686,6 @@ module.exports.exportReport = async event => {
           { name: 'Monto Pendiente', column: 'differenceAmount', width: 14 ,numFmt: '"Q"#,##0.00'},
           { name: 'Monto Total', column: 'total_amount', width: 14 ,numFmt: '"Q"#,##0.00'},                    
           { name: 'Detalle', column: 'producto_lit', width: 60},                    
-        ]
-        manifestoHeadersProducts = [
-          { name: 'Referencia Nota de servicio', column: 'nota_id', width: 18},
-          { name: 'Codigo Producto', column: 'code', width: 18},
-          { name: 'Producto', column: 'description', width: 45},
-          { name: 'Tipo', column: 'service_type_spanish', width: 20},
-          { name: 'Precio', column: 'total_product_amount', width: 20,numFmt: '"Q"#,##0.00'},
-          { name: 'Cantidad', column: 'product_quantity', width: 20}            
-        ]
-        manifestoHeadersPayments = [
-          { name: 'Referencia Nota de servicio', column: 'nota_id', width: 18},
-          { name: 'Fecha pago', column: 'payment_date', width: 18,numFmt: 'dd-mm-yyyy'},
-          { name: 'Monto', column: 'payment_amount', width: 18,numFmt: '"Q"#,##0.00'},
-          { name: 'Metodo de pago', column: 'payment_method_spanish', width: 18},
-          { name: 'Nro de documento', column: 'related_external_document', width: 18},
-          { name: 'Descripcion', column: 'description', width: 18},
         ]
         break;
       case "manualCashReceipts":
@@ -777,8 +841,8 @@ module.exports.exportReport = async event => {
         break
       case "serviceOrders":
           req.hasPermissions([types.permissions.REPORTS])
-          result = await handleRead(req, { dbQuery: db.query, storage: storage.getServiceOrders, nestedFieldsKeys: ['products'] })
-          console.log("RESULT >>> ",result)
+          result = await handleRead(req, { dbQuery: db.query, storage: storage.getServiceOrdersExport })
+          result.data = await mapServiceOrdersExportRows(result.data)
           manifestoHeaders = [                      
             { name: '# Nota de servicio', column: 'id', width: 28},            
             { name: 'Cliente', column: 'stakeholder_name', width: 20},                                    
@@ -792,6 +856,7 @@ module.exports.exportReport = async event => {
             { name: 'Tipo', column: 'service_type_spanish', width: 20},
             { name: 'Precio', column: 'total_product_amount', width: 20,numFmt: '"Q"#,##0.00'},
             { name: 'Cantidad', column: 'quantity', width: 20}]
+          break
       case "salesProducts":
         req.hasPermissions([types.permissions.REPORTS])
         result = await handleRead(req, { dbQuery: db.query, storage: storage.getSalesProductReport })
@@ -829,27 +894,16 @@ module.exports.exportReport = async event => {
     const manifestData = result.data ? result.data : []
     
     if(reportType === "cashReceipts"){
-      
-      const modifiedData = manifestData.map((obj) => {
-        const descripcionProductos = obj.products.reduce((acum, products) => {
-          if (acum === "") {
-            return products.description;
-          } else {
-            return `${acum}  ||  ${products.description}`;
-          }
-        }, "");      
-        return {
-          ...obj,
-          producto_lit: descripcionProductos,
-        };
-      });
-     
+      const exportRows = toCashReceiptsExcelRows(manifestData)
+
       report = await standardReport({
         sheets: [
           {
             name: `RECIBOS`,
             headers: manifestoHeaders,
-            data: systemInvoice ? modifiedData.filter(item => item.document_number === 'Factura del sistema') : modifiedData,
+            data: systemInvoice
+              ? exportRows.filter(item => item.document_number === 'Factura del sistema')
+              : exportRows,
           }          
         ],
       }) 
@@ -857,10 +911,9 @@ module.exports.exportReport = async event => {
     }
     else if(reportType === "serviceOrders"){
       
-      const manifestDataProducts = manifestData.flatMap((it) => {
-        let modifiedProducts = it.products.map(v => ({...v, nota_id: it.id}))        
-        return modifiedProducts
-      })
+      const manifestDataProducts = manifestData.flatMap(it =>
+        (it.products || []).map(v => ({ ...v, nota_id: it.id }))
+      )
 
       report = await standardReport({
         sheets: [
@@ -894,6 +947,7 @@ module.exports.exportReport = async event => {
     
     return await handleResponse({ req, res: { ...result, data } })
   } catch (error) {
+    console.log(error)
     return await handleResponse({ error })    
   }
 }

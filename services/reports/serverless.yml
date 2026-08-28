@@ -111,6 +111,8 @@ functions:
 
   exportReport:
     handler: handler.exportReport
+    timeout: 29
+    memorySize: 2048
     events:
       - http:
           path: reports/exportReport

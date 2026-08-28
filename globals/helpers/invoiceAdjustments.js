@@ -42,6 +42,8 @@ const findAdjustmentsByBillUuids = uuids => {
 const getDocumentTotalValue = (document, totalField = 'total') =>
   Number(document?.[totalField] ?? document?.total ?? document?.total_amount ?? 0)
 
+const ADJUSTMENT_UUID_CHUNK_SIZE = 500
+
 const enrichDocumentsWithAdjustments = async (
   documents = [],
   dbQuery,
@@ -61,8 +63,15 @@ const enrichDocumentsWithAdjustments = async (
     }))
   }
 
-  const adjustmentsQuery = findAdjustmentsByBillUuids(uuids)
-  const adjustmentRows = await dbQuery(adjustmentsQuery.query, adjustmentsQuery.params)
+  const adjustmentRows = []
+
+  for (let i = 0; i < uuids.length; i += ADJUSTMENT_UUID_CHUNK_SIZE) {
+    const chunk = uuids.slice(i, i + ADJUSTMENT_UUID_CHUNK_SIZE)
+    const adjustmentsQuery = findAdjustmentsByBillUuids(chunk)
+    const rows = await dbQuery(adjustmentsQuery.query, adjustmentsQuery.params)
+    adjustmentRows.push(...(rows || []))
+  }
+
   const adjustmentsByUuid = {}
 
   adjustmentRows.forEach(row => {
