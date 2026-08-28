@@ -759,6 +759,7 @@ module.exports.certify = async event => {
             document_type,
             operation_type,
             payment_method: req.body.payment_method || groupedPreInvoice.payment_method || 'CASH',
+            description: req.body.description || groupedPreInvoice.description || '',
           },
         },
         { connection, calculateSalesCommission: true }
@@ -768,9 +769,18 @@ module.exports.certify = async event => {
     })
 
     const billData = buildInvoiceFelPayload({
-      document: { ...groupedPreInvoice, created_by: req.currentUser.userName || 'system', credit_days: groupedPreInvoice.credit_days },
+      document: {
+        ...groupedPreInvoice,
+        created_by: req.currentUser.userName || 'system',
+        credit_days: req.body.credit_days || groupedPreInvoice.credit_days,
+        description: req.body.description || groupedPreInvoice.description || '',
+        comments: groupedPreInvoice.comments,
+      },
       stakeholder,
-      products: groupedPreInvoice.products,
+      products:
+        req.body.products && req.body.products.length > 0
+          ? req.body.products
+          : groupedPreInvoice.products,
     })
 
     let felResult = null
