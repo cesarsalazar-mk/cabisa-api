@@ -26,6 +26,9 @@ const CLIENT_DOCUMENT_NUMBER_SQL = alias => `
     ELSE CONVERT('Factura del sistema' USING utf8mb4) COLLATE utf8mb4_unicode_ci
   END`
 
+const CLIENT_IS_SYSTEM_INVOICE_SQL = alias =>
+  `(${alias}.document_number IS NULL OR ${alias}.document_number = '')`
+
 const CLIENT_PAYMENT_ACTIVE_SQL = alias => `
   (${alias}.is_deleted IS NULL OR ${alias}.is_deleted = 0)`
 
@@ -761,7 +764,10 @@ const getClientAccountInvoiceMovements = (fields = {}) => {
   return `
     SELECT
       ${CLIENT_INVOICE_DATE_SQL('dc')} AS movement_date,
-      'INVOICE' AS movement_type,
+      CASE
+        WHEN ${CLIENT_IS_SYSTEM_INVOICE_SQL('dc')} THEN 'MANUAL_INVOICE'
+        ELSE 'INVOICE'
+      END AS movement_type,
       ${CLIENT_DOCUMENT_NUMBER_SQL('dc')} AS document_number,
       CASE
         WHEN dc.serie IS NOT NULL AND dc.serie <> '' THEN CAST(dc.serie AS CHAR)

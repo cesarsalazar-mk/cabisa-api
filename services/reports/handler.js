@@ -1140,13 +1140,15 @@ module.exports.exportReport = async event => {
             const movementTypeLabel =
               movementType === 'INVOICE'
                 ? 'Factura'
-                : movementType === 'PAYMENT'
-                  ? 'Pago'
-                  : movementType === 'CREDIT_NOTE'
-                    ? 'Nota credito'
-                    : movementType === 'DEBIT_NOTE'
-                      ? 'Nota debito'
-                      : movementType
+                : movementType === 'MANUAL_INVOICE'
+                  ? 'Factura manual'
+                  : movementType === 'PAYMENT'
+                    ? 'Pago'
+                    : movementType === 'CREDIT_NOTE'
+                      ? 'Nota credito'
+                      : movementType === 'DEBIT_NOTE'
+                        ? 'Nota debito'
+                        : movementType
 
             return {
               movement_date: row.movement_date,
