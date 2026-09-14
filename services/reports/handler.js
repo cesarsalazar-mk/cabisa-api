@@ -139,6 +139,32 @@ const mapServiceOrdersExportRows = async documents => {
   }))
 }
 
+const isAutoProviderExclusion = value => {
+  if (!value) return false
+
+  if (typeof value === 'object' && value.$ne) return true
+
+  const normalized = String(value).toUpperCase()
+
+  return normalized.includes('$NE:') && normalized.includes('PROVIDER')
+}
+
+const stripClientAccountBillingFilters = (fields = {}) => {
+  const billingFilters = { ...storage.stripPaginationFields(fields) }
+
+  // reportsSrc puede inyectar status=ACTIVE y stakeholder_type != PROVIDER.
+  // Esos filtros aplican al listado de clientes; el total facturado no debe
+  // depender del status del stakeholder (clientes inactivos tambien facturaron).
+  delete billingFilters.debt_status
+  delete billingFilters.status
+
+  if (isAutoProviderExclusion(billingFilters.stakeholder_type)) {
+    delete billingFilters.stakeholder_type
+  }
+
+  return billingFilters
+}
+
 module.exports.clientsAccountState = async event => {
   try {
     const req = await handleRequest({ event })
@@ -147,7 +173,11 @@ module.exports.clientsAccountState = async event => {
 
     const res = await handleRead(req, { dbQuery: db.query, storage: storage.getClientAccountState })
     const filterFields = storage.stripPaginationFields(req.query)
+    const billingFilters = stripClientAccountBillingFilters(filterFields)
     const summaryRows = await db.query(storage.getClientAccountStateSummary(filterFields))
+    const invoiceSummaryRows = await db.query(
+      storage.getInvoiceSummary(billingFilters)
+    )
     const countResult = await db.query(storage.getClientAccountStateCount(req.query))
 
     const toNumber = value => Number(value) || 0
@@ -184,6 +214,9 @@ module.exports.clientsAccountState = async event => {
     }
 
     const summaryRow = summaryRows[0] || {}
+    const invoiceSummaryRow = invoiceSummaryRows[0] || {}
+    const approvedInvoicesAmount = toNumber(invoiceSummaryRow.approved_total)
+    const cancelledInvoicesAmount = toNumber(invoiceSummaryRow.cancelled_total)
 
     return await handleResponse({
       req,
@@ -206,12 +239,12 @@ module.exports.clientsAccountState = async event => {
             total_aging_31_60: toNumber(summaryRow.total_aging_31_60),
             total_aging_61_90: toNumber(summaryRow.total_aging_61_90),
             total_aging_over_90: toNumber(summaryRow.total_aging_over_90),
-            total_invoices_count: toNumber(summaryRow.total_invoices_count),
-            total_invoiced_amount: toNumber(summaryRow.total_invoiced_amount),
-            cancelled_invoices_count: toNumber(summaryRow.cancelled_invoices_count),
-            cancelled_invoices_amount: toNumber(summaryRow.cancelled_invoices_amount),
-            approved_invoices_count: toNumber(summaryRow.approved_invoices_count),
-            approved_invoices_amount: toNumber(summaryRow.approved_invoices_amount),
+            total_invoices_count: toNumber(invoiceSummaryRow.total_invoices),
+            total_invoiced_amount: approvedInvoicesAmount + cancelledInvoicesAmount,
+            cancelled_invoices_count: toNumber(invoiceSummaryRow.cancelled_count),
+            cancelled_invoices_amount: cancelledInvoicesAmount,
+            approved_invoices_count: toNumber(invoiceSummaryRow.approved_count),
+            approved_invoices_amount: approvedInvoicesAmount,
           },
           pagination: { total: toNumber(countResult[0]?.total) },
         },
@@ -1107,13 +1140,15 @@ module.exports.exportReport = async event => {
             const movementTypeLabel =
               movementType === 'INVOICE'
                 ? 'Factura'
-                : movementType === 'PAYMENT'
-                  ? 'Pago'
-                  : movementType === 'CREDIT_NOTE'
-                    ? 'Nota credito'
-                    : movementType === 'DEBIT_NOTE'
-                      ? 'Nota debito'
-                      : movementType
+                : movementType === 'MANUAL_INVOICE'
+                  ? 'Factura manual'
+                  : movementType === 'PAYMENT'
+                    ? 'Pago'
+                    : movementType === 'CREDIT_NOTE'
+                      ? 'Nota credito'
+                      : movementType === 'DEBIT_NOTE'
+                        ? 'Nota debito'
+                        : movementType
 
             return {
               movement_date: row.movement_date,
