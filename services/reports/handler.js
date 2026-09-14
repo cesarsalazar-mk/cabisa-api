@@ -150,26 +150,40 @@ module.exports.clientsAccountState = async event => {
     const summaryRows = await db.query(storage.getClientAccountStateSummary(filterFields))
     const countResult = await db.query(storage.getClientAccountStateCount(req.query))
 
+    const toNumber = value => Number(value) || 0
+
     const mapClient = d => {
-      const totalCharge = Number(d.total_charge) || 0
-      const paidCredit = Number(d.paid_credit) || 0
-      const creditBalance = totalCharge - paidCredit
+      const balance = toNumber(d.balance)
+      const aging0To30 = toNumber(d.aging_0_30)
+      const aging31To60 = toNumber(d.aging_31_60)
+      const aging61To90 = toNumber(d.aging_61_90)
+      const agingOver90 = toNumber(d.aging_over_90)
+      const maxDaysOverdue = toNumber(d.max_days_overdue)
+      const accountStatus = d.account_status || (balance > 0 ? 'POR_VENCER' : 'AL_DIA')
 
       return {
         ...d,
-        paid_credit: paidCredit,
-        credit_limit: Number(d.credit_limit) || 0,
-        total_credit: totalCharge,
-        current_credit: totalCharge,
-        credit_balance: creditBalance,
-        has_debt: creditBalance > 0,
-        has_overdue_debt_120: Boolean(Number(d.has_overdue_debt_120)),
-        total_charge: totalCharge,
+        credit_limit: toNumber(d.credit_limit),
+        balance,
+        aging_0_30: aging0To30,
+        aging_31_60: aging31To60,
+        aging_61_90: aging61To90,
+        aging_over_90: agingOver90,
+        max_days_overdue: maxDaysOverdue,
+        unpaid_invoices_count: toNumber(d.unpaid_invoices_count),
+        paid_invoices_count: toNumber(d.paid_invoices_count),
+        total_paid: toNumber(d.total_paid),
+        last_movement_date: d.last_movement_date || null,
+        last_payment_date: d.last_payment_date || null,
+        last_payment_document: d.last_payment_document || null,
+        account_status: accountStatus,
+        has_debt: accountStatus !== 'AL_DIA',
+        has_overdue: accountStatus === 'VENCIDO' || accountStatus === 'VENCIDO_90',
+        credit_balance: balance,
       }
     }
 
     const summaryRow = summaryRows[0] || {}
-    const toNumber = value => Number(value) || 0
 
     return await handleResponse({
       req,
@@ -181,17 +195,276 @@ module.exports.clientsAccountState = async event => {
             total_clients: toNumber(summaryRow.total_clients),
             clients_with_debt: toNumber(summaryRow.clients_with_debt),
             clients_without_debt: toNumber(summaryRow.clients_without_debt),
-            total_credit: toNumber(summaryRow.total_credit),
-            total_paid_credit: toNumber(summaryRow.total_paid_credit),
-            total_credit_balance: toNumber(summaryRow.total_credit_balance),
+            clients_overdue: toNumber(summaryRow.clients_overdue),
+            clients_overdue_90: toNumber(summaryRow.clients_overdue_90),
+            total_balance: toNumber(summaryRow.total_balance),
             total_debt_balance: toNumber(summaryRow.total_debt_balance),
-            total_debt_charge: toNumber(summaryRow.total_debt_charge),
-            total_debt_paid: toNumber(summaryRow.total_debt_paid),
-            total_without_debt_balance: toNumber(summaryRow.total_without_debt_balance),
-            total_without_debt_charge: toNumber(summaryRow.total_without_debt_charge),
-            total_without_debt_paid: toNumber(summaryRow.total_without_debt_paid),
+            total_paid: toNumber(summaryRow.total_paid),
+            total_unpaid_invoices: toNumber(summaryRow.total_unpaid_invoices),
+            total_paid_invoices: toNumber(summaryRow.total_paid_invoices),
+            total_aging_0_30: toNumber(summaryRow.total_aging_0_30),
+            total_aging_31_60: toNumber(summaryRow.total_aging_31_60),
+            total_aging_61_90: toNumber(summaryRow.total_aging_61_90),
+            total_aging_over_90: toNumber(summaryRow.total_aging_over_90),
+            total_invoices_count: toNumber(summaryRow.total_invoices_count),
+            total_invoiced_amount: toNumber(summaryRow.total_invoiced_amount),
+            cancelled_invoices_count: toNumber(summaryRow.cancelled_invoices_count),
+            cancelled_invoices_amount: toNumber(summaryRow.cancelled_invoices_amount),
+            approved_invoices_count: toNumber(summaryRow.approved_invoices_count),
+            approved_invoices_amount: toNumber(summaryRow.approved_invoices_amount),
           },
           pagination: { total: toNumber(countResult[0]?.total) },
+        },
+      },
+    })
+  } catch (error) {
+    console.log(error)
+    return await handleResponse({ error })
+  }
+}
+
+module.exports.clientsAccountMovements = async event => {
+  try {
+    const req = await handleRequest({ event })
+
+    req.hasPermissions([types.permissions.REPORTS])
+
+    if (!req.query.stakeholder_id) {
+      return await handleResponse({
+        req,
+        res: { statusCode: 400, message: 'stakeholder_id es requerido' },
+      })
+    }
+
+    const toNumber = value => Number(value) || 0
+    const toText = value => (value == null ? '' : String(value))
+    const toSortDate = value => {
+      if (!value) return 0
+      const time = new Date(value).getTime()
+      return Number.isNaN(time) ? 0 : time
+    }
+
+    const limit = Math.max(1, toNumber(req.query.$limit) || 20)
+    const offset = Math.max(0, toNumber(req.query.$offset) || 0)
+
+    const [openingRows, invoiceRows, paymentRows, noteRows] = await Promise.all([
+      db.query(storage.getClientAccountOpeningBalance(req.query)),
+      db.query(storage.getClientAccountInvoiceMovements(req.query)),
+      db.query(storage.getClientAccountPaymentMovements(req.query)),
+      db.query(storage.getClientAccountNoteMovements(req.query)),
+    ])
+
+    const openingBalance = toNumber(openingRows?.[0]?.opening_balance)
+    const rows = [...(invoiceRows || []), ...(paymentRows || []), ...(noteRows || [])].sort(
+      (a, b) => {
+        const dateDiff = toSortDate(a.movement_date) - toSortDate(b.movement_date)
+        if (dateDiff !== 0) return dateDiff
+        return toNumber(a.sort_id) - toNumber(b.sort_id)
+      }
+    )
+
+    let runningBalance = openingBalance
+    const allItems = rows.map(row => {
+      const chargeAmount = toNumber(row.charge_amount)
+      const creditAmount = toNumber(row.credit_amount)
+      runningBalance = runningBalance + chargeAmount - creditAmount
+
+      return {
+        movement_date: row.movement_date,
+        movement_type: toText(row.movement_type),
+        document_number: toText(row.document_number),
+        reference: toText(row.reference),
+        charge_amount: chargeAmount,
+        credit_amount: creditAmount,
+        running_balance: runningBalance,
+      }
+    })
+
+    const documentNumber = toText(req.query.document_number).trim().toLowerCase()
+    const filteredItems = documentNumber
+      ? allItems.filter(item =>
+          toText(item.document_number).toLowerCase().includes(documentNumber)
+        )
+      : allItems
+
+    const items = filteredItems.slice(offset, offset + limit)
+
+    return await handleResponse({
+      req,
+      res: {
+        statusCode: 200,
+        data: {
+          opening_balance: openingBalance,
+          closing_balance: runningBalance,
+          items,
+          pagination: {
+            total: filteredItems.length,
+            limit,
+            offset,
+          },
+        },
+      },
+    })
+  } catch (error) {
+    console.log(error)
+    return await handleResponse({ error })
+  }
+}
+
+module.exports.clientsAccountUnpaidInvoices = async event => {
+  try {
+    const req = await handleRequest({ event })
+
+    req.hasPermissions([types.permissions.REPORTS])
+
+    if (!req.query.stakeholder_id) {
+      return await handleResponse({
+        req,
+        res: { statusCode: 400, message: 'stakeholder_id es requerido' },
+      })
+    }
+
+    const rows = await db.query(
+      storage.getClientAccountInvoices({
+        ...req.query,
+        payment_status: req.query.payment_status || 'UNPAID',
+      })
+    )
+    const toNumber = value => Number(value) || 0
+
+    const invoiceIds = (rows || []).map(row => row.id).filter(Boolean)
+    const paymentRows = invoiceIds.length
+      ? await db.query(
+          storage.getClientAccountInvoicePayments({
+            stakeholder_id: req.query.stakeholder_id,
+            document_ids: invoiceIds.join(','),
+          })
+        )
+      : []
+
+    const paymentsByDocument = (paymentRows || []).reduce((acc, row) => {
+      const key = String(row.document_id)
+      if (!acc[key]) acc[key] = []
+      acc[key].push({
+        payment_id: row.payment_id,
+        payment_date: row.payment_date,
+        payment_amount: toNumber(row.payment_amount),
+        reference: row.reference || '',
+        document_number: row.document_number,
+      })
+      return acc
+    }, {})
+
+    const items = (rows || []).map(row => ({
+      id: row.id,
+      document_number: row.document_number,
+      serie: row.serie,
+      document_date: row.document_date,
+      due_date: row.due_date,
+      total_amount: toNumber(row.total_amount),
+      paid_amount: toNumber(row.paid_amount),
+      unpaid_amount: toNumber(row.unpaid_amount),
+      last_payment_date: row.last_payment_date || null,
+      days_overdue: toNumber(row.days_overdue),
+      payment_status: row.payment_status,
+      payments: paymentsByDocument[String(row.id)] || [],
+    }))
+
+    return await handleResponse({
+      req,
+      res: {
+        statusCode: 200,
+        data: { items },
+      },
+    })
+  } catch (error) {
+    console.log(error)
+    return await handleResponse({ error })
+  }
+}
+
+module.exports.clientsAccountInvoices = async event => {
+  try {
+    const req = await handleRequest({ event })
+
+    req.hasPermissions([types.permissions.REPORTS])
+
+    if (!req.query.stakeholder_id) {
+      return await handleResponse({
+        req,
+        res: { statusCode: 400, message: 'stakeholder_id es requerido' },
+      })
+    }
+
+    const toNumber = value => Number(value) || 0
+    const limit = Math.max(1, toNumber(req.query.$limit) || 20)
+    const offset = Math.max(0, toNumber(req.query.$offset) || 0)
+    const queryFields = {
+      ...req.query,
+      $limit: limit,
+      $offset: offset,
+    }
+
+    const [rows, countRows] = await Promise.all([
+      db.query(storage.getClientAccountInvoices(queryFields)),
+      db.query(storage.getClientAccountInvoicesCount(queryFields)),
+    ])
+
+    const invoiceIds = (rows || []).map(row => row.id).filter(Boolean)
+    const paymentRows = invoiceIds.length
+      ? await db.query(
+          storage.getClientAccountInvoicePayments({
+            stakeholder_id: req.query.stakeholder_id,
+            document_ids: invoiceIds.join(','),
+          })
+        )
+      : []
+
+    const paymentsByDocument = (paymentRows || []).reduce((acc, row) => {
+      const key = String(row.document_id)
+      if (!acc[key]) acc[key] = []
+      acc[key].push({
+        payment_id: row.payment_id,
+        payment_date: row.payment_date,
+        payment_amount: toNumber(row.payment_amount),
+        reference: row.reference || '',
+        document_number: row.document_number,
+      })
+      return acc
+    }, {})
+
+    const items = (rows || []).map(row => ({
+      id: row.id,
+      document_number: row.document_number,
+      serie: row.serie,
+      document_date: row.document_date,
+      due_date: row.due_date,
+      total_amount: toNumber(row.total_amount),
+      paid_amount: toNumber(row.paid_amount),
+      unpaid_amount: toNumber(row.unpaid_amount),
+      last_payment_date: row.last_payment_date || null,
+      days_overdue: toNumber(row.days_overdue),
+      payment_status: row.payment_status,
+      payments: paymentsByDocument[String(row.id)] || [],
+    }))
+
+    const countRow = countRows?.[0] || {}
+
+    return await handleResponse({
+      req,
+      res: {
+        statusCode: 200,
+        data: {
+          items,
+          summary: {
+            total_unpaid_amount: toNumber(countRow.total_unpaid_amount),
+            total_paid_amount: toNumber(countRow.total_paid_amount),
+          },
+          pagination: {
+            total: toNumber(countRow.total),
+            limit,
+            offset,
+          },
         },
       },
     })
@@ -732,29 +1005,181 @@ module.exports.exportReport = async event => {
       case "clientReport":
           req.hasPermissions([types.permissions.REPORTS])
           result = await handleRead(req, { dbQuery: db.query, storage: storage.getClientAccountState })
-          result.data = result.data[0] ? result.data.map(d => ({
-          ...d,
-          paid_credit : Number(d.paid_credit),
-          credit_limit: Number(d.credit_limit),
-          total_credit : d.total_charge,
-          current_credit: d.total_charge,
-          credit_balance: Number(d.total_charge) - Number(d.paid_credit),
-          has_debt: Number(d.total_charge) - Number(d.paid_credit) > 0,
-          has_overdue_debt_120: Boolean(Number(d.has_overdue_debt_120)),
-          total_charge: d.total_charge === null ? 0 : d.total_charge
-        })) : []
+          result.data = result.data[0] ? result.data.map(d => {
+            const balance = Number(d.balance) || 0
 
-        manifestoHeaders = [          
-          { name: 'Codigo Cliente', column: 'id', width: 12 },                    
-          { name: 'Nombre o razon social', column: 'name', width: 28},
-          { name: 'Nit', column: 'nit', width: 15},
-          { name: 'Fecha de Creacion', column: 'created_at', width: 18,numFmt: 'dd-mm-yyyy hh:mm:ss' },
-          { name: 'Tipo', column: 'stakeholder_type_spanish', width: 18 },          
-          { name: 'Cargos', column: 'total_charge', width: 14 ,numFmt: '"Q"#,##0.00'},
-          { name: 'Pagado', column: 'paid_credit', width: 14 ,numFmt: '"Q"#,##0.00'},
-          { name: 'Balance', column: 'credit_balance', width: 14 ,numFmt: '"Q"#,##0.00'},          
+            return {
+              ...d,
+              credit_limit: Number(d.credit_limit) || 0,
+              balance,
+              total_paid: Number(d.total_paid) || 0,
+              aging_0_30: Number(d.aging_0_30) || 0,
+              aging_31_60: Number(d.aging_31_60) || 0,
+              aging_61_90: Number(d.aging_61_90) || 0,
+              aging_over_90: Number(d.aging_over_90) || 0,
+              max_days_overdue: Number(d.max_days_overdue) || 0,
+              unpaid_invoices_count: Number(d.unpaid_invoices_count) || 0,
+              paid_invoices_count: Number(d.paid_invoices_count) || 0,
+              last_movement_date: d.last_movement_date || null,
+              last_payment_date: d.last_payment_date || null,
+              last_payment_document: d.last_payment_document || null,
+              account_status: d.account_status,
+              account_status_label:
+                d.account_status === 'AL_DIA'
+                  ? 'Ya pagado'
+                  : d.account_status === 'POR_VENCER'
+                    ? 'Pendiente de pago'
+                    : d.account_status === 'VENCIDO_90'
+                      ? 'Vencido +90'
+                      : 'Vencido',
+            }
+          }) : []
+
+        manifestoHeaders = [
+          { name: 'Codigo Cliente', column: 'id', width: 12 },
+          { name: 'Nombre o razon social', column: 'name', width: 28 },
+          { name: 'Nit', column: 'nit', width: 15 },
+          { name: 'Tipo', column: 'stakeholder_type_spanish', width: 18 },
+          { name: 'Estado', column: 'account_status_label', width: 16 },
+          { name: 'Saldo pendiente', column: 'balance', width: 14, numFmt: '"Q"#,##0.00' },
+          { name: 'Total pagado', column: 'total_paid', width: 14, numFmt: '"Q"#,##0.00' },
+          { name: 'Dias atraso', column: 'max_days_overdue', width: 12 },
+          { name: 'Facturas pendientes', column: 'unpaid_invoices_count', width: 14 },
+          { name: 'Facturas pagadas', column: 'paid_invoices_count', width: 14 },
+          { name: 'Ultimo movimiento', column: 'last_movement_date', width: 16, numFmt: 'dd-mm-yyyy' },
+          { name: 'Ultimo pago', column: 'last_payment_date', width: 16, numFmt: 'dd-mm-yyyy' },
+          { name: 'Factura ultimo pago', column: 'last_payment_document', width: 18 },
+          { name: 'Proximo vencimiento', column: 'next_due_date', width: 16, numFmt: 'dd-mm-yyyy' },
+          { name: '0-30 dias', column: 'aging_0_30', width: 12, numFmt: '"Q"#,##0.00' },
+          { name: '31-60 dias', column: 'aging_31_60', width: 12, numFmt: '"Q"#,##0.00' },
+          { name: '61-90 dias', column: 'aging_61_90', width: 12, numFmt: '"Q"#,##0.00' },
+          { name: '+90 dias', column: 'aging_over_90', width: 12, numFmt: '"Q"#,##0.00' },
         ]
         break;
+      case "clientAccountDetailReport": {
+        req.hasPermissions([types.permissions.REPORTS])
+
+        if (!req.query.stakeholder_id) {
+          return await handleResponse({
+            req,
+            res: {
+              statusCode: 400,
+              data: { error: 'stakeholder_id es requerido' },
+              message: 'stakeholder_id es requerido',
+            },
+          })
+        }
+
+        const toNumber = value => Number(value) || 0
+        const toText = value => (value == null ? '' : String(value))
+        const toSortDate = value => {
+          if (!value) return 0
+          const time = new Date(value).getTime()
+          return Number.isNaN(time) ? 0 : time
+        }
+        const viewMode = String(req.query.view_mode || 'UNPAID').toUpperCase()
+        delete req.query.view_mode
+
+        if (viewMode === 'HISTORY') {
+          const [openingRows, invoiceRows, paymentRows, noteRows] = await Promise.all([
+            db.query(storage.getClientAccountOpeningBalance(req.query)),
+            db.query(storage.getClientAccountInvoiceMovements(req.query)),
+            db.query(storage.getClientAccountPaymentMovements(req.query)),
+            db.query(storage.getClientAccountNoteMovements(req.query)),
+          ])
+
+          const openingBalance = toNumber(openingRows?.[0]?.opening_balance)
+          const rows = [...(invoiceRows || []), ...(paymentRows || []), ...(noteRows || [])].sort(
+            (a, b) => {
+              const dateDiff = toSortDate(a.movement_date) - toSortDate(b.movement_date)
+              if (dateDiff !== 0) return dateDiff
+              return toNumber(a.sort_id) - toNumber(b.sort_id)
+            }
+          )
+
+          let runningBalance = openingBalance
+          let allItems = rows.map(row => {
+            const chargeAmount = toNumber(row.charge_amount)
+            const creditAmount = toNumber(row.credit_amount)
+            runningBalance = runningBalance + chargeAmount - creditAmount
+
+            const movementType = toText(row.movement_type)
+            const movementTypeLabel =
+              movementType === 'INVOICE'
+                ? 'Factura'
+                : movementType === 'PAYMENT'
+                  ? 'Pago'
+                  : movementType === 'CREDIT_NOTE'
+                    ? 'Nota credito'
+                    : movementType === 'DEBIT_NOTE'
+                      ? 'Nota debito'
+                      : movementType
+
+            return {
+              movement_date: row.movement_date,
+              movement_type_label: movementTypeLabel,
+              document_number: toText(row.document_number),
+              reference: toText(row.reference),
+              charge_amount: chargeAmount,
+              credit_amount: creditAmount,
+              running_balance: runningBalance,
+            }
+          })
+
+          const documentNumber = toText(req.query.document_number).trim().toLowerCase()
+          if (documentNumber) {
+            allItems = allItems.filter(item =>
+              toText(item.document_number).toLowerCase().includes(documentNumber)
+            )
+          }
+
+          result = { statusCode: 200, data: allItems }
+          manifestoHeaders = [
+            { name: 'Fecha', column: 'movement_date', width: 16, numFmt: 'dd-mm-yyyy' },
+            { name: 'Tipo', column: 'movement_type_label', width: 14 },
+            { name: 'Documento', column: 'document_number', width: 16 },
+            { name: 'Referencia', column: 'reference', width: 28 },
+            { name: 'Cargo', column: 'charge_amount', width: 14, numFmt: '"Q"#,##0.00' },
+            { name: 'Abono', column: 'credit_amount', width: 14, numFmt: '"Q"#,##0.00' },
+            { name: 'Saldo', column: 'running_balance', width: 14, numFmt: '"Q"#,##0.00' },
+          ]
+        } else {
+          const { $limit, $offset, ...invoiceQuery } = req.query
+          const rows = await db.query(
+            storage.getClientAccountInvoices({
+              ...invoiceQuery,
+              payment_status: viewMode,
+            })
+          )
+
+          result = {
+            statusCode: 200,
+            data: (rows || []).map(row => ({
+              document_number: row.document_number,
+              document_date: row.document_date,
+              due_date: row.due_date,
+              total_amount: toNumber(row.total_amount),
+              paid_amount: toNumber(row.paid_amount),
+              unpaid_amount: toNumber(row.unpaid_amount),
+              last_payment_date: row.last_payment_date || null,
+              payment_status_label:
+                row.payment_status === 'PAID' ? 'Pagada' : 'Pendiente',
+            })),
+          }
+
+          manifestoHeaders = [
+            { name: 'Factura', column: 'document_number', width: 16 },
+            { name: 'Fecha', column: 'document_date', width: 16, numFmt: 'dd-mm-yyyy' },
+            { name: 'Vence', column: 'due_date', width: 16, numFmt: 'dd-mm-yyyy' },
+            { name: 'Total', column: 'total_amount', width: 14, numFmt: '"Q"#,##0.00' },
+            { name: 'Pagado', column: 'paid_amount', width: 14, numFmt: '"Q"#,##0.00' },
+            { name: 'Pendiente', column: 'unpaid_amount', width: 14, numFmt: '"Q"#,##0.00' },
+            { name: 'Ultimo pago', column: 'last_payment_date', width: 16, numFmt: 'dd-mm-yyyy' },
+            { name: 'Estado', column: 'payment_status_label', width: 12 },
+          ]
+        }
+        break
+      }
       case "inventoryReport": case "inventoryReportDetail":
         req.hasPermissions([types.permissions.REPORTS])
 

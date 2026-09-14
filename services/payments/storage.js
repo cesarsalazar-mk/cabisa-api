@@ -1,4 +1,4 @@
-const { types, getWhereConditions, toGuatemalaDateSql } = require(`${process.env['FILE_ENVIRONMENT']}/globals`)
+const { types, getWhereConditions, toFactDateSql } = require(`${process.env['FILE_ENVIRONMENT']}/globals`)
 
 const stripPaginationFields = (fields = {}) => {
   const { $limit, $offset, ...filterFields } = fields
@@ -26,8 +26,14 @@ const buildWhereConditions = (fields = {}, docAlias = 'd', stakeholderAlias = 's
   return rawWhereConditions
     .replace(new RegExp(`${docAlias}\\.nit`, 'gi'), `${stakeholderAlias}.nit`)
     .replace(new RegExp(`${docAlias}\\.name`, 'gi'), `${stakeholderAlias}.name`)
-    .replace(new RegExp(`${docAlias}\\.start_date`, 'gi'), toGuatemalaDateSql(`${docAlias}.created_at`))
-    .replace(new RegExp(`${docAlias}\\.end_date`, 'gi'), toGuatemalaDateSql(`${docAlias}.created_at`))
+    .replace(
+      new RegExp(`${docAlias}\\.start_date`, 'gi'),
+      toFactDateSql(`${docAlias}.fact_date`)
+    )
+    .replace(
+      new RegExp(`${docAlias}\\.end_date`, 'gi'),
+      toFactDateSql(`${docAlias}.fact_date`)
+    )
 }
 
 const findAllBy = (fields = {}) => {
@@ -72,6 +78,7 @@ const findAllBy = (fields = {}) => {
       d.payment_method,
       d.credit_days,
       d.credit_status,
+      d.fact_date,
       d.created_at,
       d.created_by,
       d.updated_at,

@@ -39,6 +39,36 @@ functions:
     layers:
       - arn:${file(${self:custom.config}):layer}
 
+  clientsAccountMovements:
+    handler: handler.clientsAccountMovements
+    events:
+      - http:
+          path: reports/clients-account-movements
+          method: get
+          cors: true
+    layers:
+      - arn:${file(${self:custom.config}):layer}
+
+  clientsAccountUnpaidInvoices:
+    handler: handler.clientsAccountUnpaidInvoices
+    events:
+      - http:
+          path: reports/clients-account-unpaid-invoices
+          method: get
+          cors: true
+    layers:
+      - arn:${file(${self:custom.config}):layer}
+
+  clientsAccountInvoices:
+    handler: handler.clientsAccountInvoices
+    events:
+      - http:
+          path: reports/clients-account-invoices
+          method: get
+          cors: true
+    layers:
+      - arn:${file(${self:custom.config}):layer}
+
   accountsReceivable:
     handler: handler.accountsReceivable
     events:
