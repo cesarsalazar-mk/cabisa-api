@@ -12,6 +12,20 @@ const CLIENT_APPROVED_INVOICE_SQL = alias => `
   ${CLIENT_INVOICE_TYPES_SQL(alias)}
   AND ${alias}.status = '${types.documentsStatus.APPROVED}'`
 
+// Facturación Sistema: sin # documento FEL y a veces sin fact_date.
+// Usamos created_at como fallback para no excluirlas del estado de cuenta.
+const CLIENT_INVOICE_DATE_SQL = alias =>
+  `COALESCE(${toFactDateSql(`${alias}.fact_date`)}, ${toGuatemalaDateSql(`${alias}.created_at`)})`
+
+const CLIENT_DOCUMENT_NUMBER_SQL = alias => `
+  CASE
+    WHEN ${alias}.document_number IS NOT NULL AND ${alias}.document_number <> ''
+      THEN CONVERT(${alias}.document_number USING utf8mb4) COLLATE utf8mb4_unicode_ci
+    WHEN ${alias}.related_internal_document_id IS NOT NULL
+      THEN CONVERT(CAST(${alias}.related_internal_document_id AS CHAR) USING utf8mb4) COLLATE utf8mb4_unicode_ci
+    ELSE CONVERT('Factura del sistema' USING utf8mb4) COLLATE utf8mb4_unicode_ci
+  END`
+
 const CLIENT_PAYMENT_ACTIVE_SQL = alias => `
   (${alias}.is_deleted IS NULL OR ${alias}.is_deleted = 0)`
 
@@ -24,7 +38,7 @@ const CLIENT_NOTE_AMOUNT_SQL = `
 const CLIENT_DUE_DATE_SQL = alias => `
   COALESCE(
     DATE(${alias}.credit_due_date),
-    DATE_ADD(${toFactDateSql(`${alias}.fact_date`)}, INTERVAL COALESCE(${alias}.credit_days, 0) DAY)
+    DATE_ADD(${CLIENT_INVOICE_DATE_SQL(alias)}, INTERVAL COALESCE(${alias}.credit_days, 0) DAY)
   )`
 
 const CLIENT_PAYMENTS_TO_DATE_SQL = (docAlias, asOfDateSql) => `
@@ -102,7 +116,7 @@ const buildClientAccountInvoicesSumSql = (stakeholderExpr, { startDate, endDate,
     FROM documents dc
     WHERE dc.stakeholder_id = ${stakeholderExpr}
       AND ${CLIENT_APPROVED_INVOICE_SQL('dc')}
-      ${buildClientAccountDateFilter(toFactDateSql('dc.fact_date'), { startDate, endDate, beforeDate })}
+      ${buildClientAccountDateFilter(CLIENT_INVOICE_DATE_SQL('dc'), { startDate, endDate, beforeDate })}
   ), 0)`
 
 const buildClientAccountPaymentsSumSql = (stakeholderExpr, { startDate, endDate, beforeDate } = {}) => `
@@ -195,7 +209,7 @@ const buildClientAccountBalanceAgg = (asOfDateSql = 'CURDATE()') => `
         DATEDIFF(${asOfDateSql}, ${CLIENT_DUE_DATE_SQL('dc')}) AS age_days
       FROM documents dc
       WHERE ${CLIENT_APPROVED_INVOICE_SQL('dc')}
-        AND ${toFactDateSql('dc.fact_date')} <= ${asOfDateSql}
+        AND ${CLIENT_INVOICE_DATE_SQL('dc')} <= ${asOfDateSql}
     ) aged
     GROUP BY aged.stakeholder_id
   ) base
@@ -205,7 +219,7 @@ const buildClientAccountBalanceAgg = (asOfDateSql = 'CURDATE()') => `
 const buildClientAccountLastInvoiceAgg = () => `
   SELECT
     dc.stakeholder_id,
-    MAX(${toFactDateSql('dc.fact_date')}) AS last_invoice_date
+    MAX(${CLIENT_INVOICE_DATE_SQL('dc')}) AS last_invoice_date
   FROM documents dc
   WHERE ${CLIENT_APPROVED_INVOICE_SQL('dc')}
   GROUP BY dc.stakeholder_id`
@@ -227,10 +241,7 @@ const buildClientAccountLastPaymentAgg = () => `
     SELECT
       dc.stakeholder_id,
       ${toGuatemalaDateSql('p.payment_date')} AS payment_date,
-      CASE
-        WHEN dc.document_number IS NOT NULL AND dc.document_number <> '' THEN dc.document_number
-        ELSE CAST(dc.id AS CHAR)
-      END AS document_number,
+      ${CLIENT_DOCUMENT_NUMBER_SQL('dc')} AS document_number,
       ROW_NUMBER() OVER (
         PARTITION BY dc.stakeholder_id
         ORDER BY ${toGuatemalaDateSql('p.payment_date')} DESC, p.id DESC
@@ -403,7 +414,38 @@ const getClientAccountStateCount = (fields = {}) => `
   ) AS counted_clients;
 `
 
-const getClientAccountStateSummary = (fields = {}) => `
+const buildClientAccountInvoiceSummaryStakeholderWhere = (filterFields = {}) => {
+  const allowedFields = {}
+
+  if (filterFields.name) allowedFields.name = filterFields.name
+  if (filterFields.nit) allowedFields.nit = filterFields.nit
+  if (filterFields.stakeholder_type) {
+    allowedFields.stakeholder_type = filterFields.stakeholder_type
+  }
+  if (filterFields.status) allowedFields.status = filterFields.status
+
+  const rawWhereConditions = getWhereConditions({
+    fields: allowedFields,
+    tableAlias: 'd',
+    hasPreviousConditions: true,
+  })
+
+  return rawWhereConditions
+    .replace(/d\.nit/gi, 's.nit')
+    .replace(/d\.name/gi, 's.name')
+    .replace(/d\.stakeholder_type/gi, 's.stakeholder_type')
+    .replace(/d\.status/gi, 's.status')
+}
+
+const getClientAccountStateSummary = (fields = {}) => {
+  const { filterFields } = parseClientAccountFilterFields(
+    stripPaginationFields(fields)
+  )
+
+  // Total facturado / anulado: misma base que Factura Electronica.
+  // El filtro de deuda (Pendiente/Vencido/etc.) solo afecta la tarjeta de clientes,
+  // no el universo de facturas.
+  return `
   SELECT
     client_summary.total_clients,
     client_summary.clients_with_debt,
@@ -486,16 +528,12 @@ const getClientAccountStateSummary = (fields = {}) => `
         0
       ) AS approved_invoices_amount
     FROM documents d
-    INNER JOIN (
-      ${buildClientAccountFilteredClientsSubquery(fields)}
-    ) filtered_clients ON filtered_clients.id = d.stakeholder_id
+    LEFT JOIN stakeholders s ON s.id = d.stakeholder_id
     WHERE ${CLIENT_INVOICE_TYPES_SQL('d')}
-      AND d.status IN (
-        '${types.documentsStatus.APPROVED}',
-        '${types.documentsStatus.CANCELLED}'
-      )
+    ${buildClientAccountInvoiceSummaryStakeholderWhere(filterFields)}
   ) invoice_summary;
 `
+}
 
 const buildClientAccountInvoicesBase = (fields = {}) => {
   const stakeholderId = String(fields.stakeholder_id || '').replace(/[^\d]/g, '')
@@ -525,13 +563,16 @@ const buildClientAccountInvoicesBase = (fields = {}) => {
     FROM (
       SELECT
         dc.id,
+        dc.related_internal_document_id,
         CASE
           WHEN dc.document_number IS NOT NULL AND dc.document_number <> ''
             THEN CONVERT(dc.document_number USING utf8mb4) COLLATE utf8mb4_unicode_ci
-          ELSE CONVERT(CAST(dc.id AS CHAR) USING utf8mb4) COLLATE utf8mb4_unicode_ci
+          WHEN dc.related_internal_document_id IS NOT NULL
+            THEN CONVERT(CAST(dc.related_internal_document_id AS CHAR) USING utf8mb4) COLLATE utf8mb4_unicode_ci
+          ELSE CONVERT('Factura del sistema' USING utf8mb4) COLLATE utf8mb4_unicode_ci
         END AS document_number,
         dc.serie,
-        ${toFactDateSql('dc.fact_date')} AS document_date,
+        ${CLIENT_INVOICE_DATE_SQL('dc')} AS document_date,
         ${CLIENT_DUE_DATE_SQL('dc')} AS due_date,
         (dc.total_amount + ${getDocumentNetAdjustmentSql('dc')}) AS total_amount,
         ${CLIENT_PAYMENTS_TO_DATE_SQL('dc', asOfDateSql)} AS paid_amount,
@@ -547,7 +588,7 @@ const buildClientAccountInvoicesBase = (fields = {}) => {
       FROM documents dc
       WHERE dc.stakeholder_id = ${stakeholderId || 0}
         AND ${CLIENT_APPROVED_INVOICE_SQL('dc')}
-        AND ${toFactDateSql('dc.fact_date')} <= ${asOfDateSql}
+        AND ${CLIENT_INVOICE_DATE_SQL('dc')} <= ${asOfDateSql}
     ) invoice
     ${paymentFilter}
     ${documentNumberFilter}
@@ -564,6 +605,7 @@ const getClientAccountInvoices = (fields = {}) => {
     return `
       SELECT
         NULL AS id,
+        NULL AS related_internal_document_id,
         NULL AS document_number,
         NULL AS serie,
         NULL AS document_date,
@@ -580,6 +622,7 @@ const getClientAccountInvoices = (fields = {}) => {
   return `
     SELECT
       invoice.id,
+      invoice.related_internal_document_id,
       invoice.document_number,
       invoice.serie,
       invoice.document_date,
@@ -653,10 +696,7 @@ const getClientAccountInvoicePayments = (fields = {}) => {
     SELECT
       p.id AS payment_id,
       dc.id AS document_id,
-      CASE
-        WHEN dc.document_number IS NOT NULL AND dc.document_number <> '' THEN dc.document_number
-        ELSE CAST(dc.id AS CHAR)
-      END AS document_number,
+      ${CLIENT_DOCUMENT_NUMBER_SQL('dc')} AS document_number,
       p.payment_date,
       p.payment_amount,
       CASE
@@ -720,12 +760,9 @@ const getClientAccountInvoiceMovements = (fields = {}) => {
 
   return `
     SELECT
-      ${toFactDateSql('dc.fact_date')} AS movement_date,
+      ${CLIENT_INVOICE_DATE_SQL('dc')} AS movement_date,
       'INVOICE' AS movement_type,
-      CASE
-        WHEN dc.document_number IS NOT NULL AND dc.document_number <> '' THEN dc.document_number
-        ELSE CAST(dc.id AS CHAR)
-      END AS document_number,
+      ${CLIENT_DOCUMENT_NUMBER_SQL('dc')} AS document_number,
       CASE
         WHEN dc.serie IS NOT NULL AND dc.serie <> '' THEN CAST(dc.serie AS CHAR)
         WHEN dc.description IS NOT NULL AND dc.description <> '' THEN CAST(dc.description AS CHAR)
@@ -737,8 +774,8 @@ const getClientAccountInvoiceMovements = (fields = {}) => {
     FROM documents dc
     WHERE dc.stakeholder_id = ${stakeholderId}
       AND ${CLIENT_APPROVED_INVOICE_SQL('dc')}
-      ${buildClientAccountDateFilter(toFactDateSql('dc.fact_date'), periodFilter)}
-    ORDER BY ${toFactDateSql('dc.fact_date')} ASC, dc.id ASC;
+      ${buildClientAccountDateFilter(CLIENT_INVOICE_DATE_SQL('dc'), periodFilter)}
+    ORDER BY ${CLIENT_INVOICE_DATE_SQL('dc')} ASC, dc.id ASC;
   `
 }
 
@@ -765,10 +802,7 @@ const getClientAccountPaymentMovements = (fields = {}) => {
     SELECT
       p.payment_date AS movement_date,
       'PAYMENT' AS movement_type,
-      CASE
-        WHEN dc.document_number IS NOT NULL AND dc.document_number <> '' THEN dc.document_number
-        ELSE CAST(dc.id AS CHAR)
-      END AS document_number,
+      ${CLIENT_DOCUMENT_NUMBER_SQL('dc')} AS document_number,
       CASE
         WHEN p.related_external_document IS NOT NULL AND p.related_external_document <> ''
           THEN CAST(p.related_external_document AS CHAR)
@@ -1193,6 +1227,10 @@ const buildInvoiceReportWhere = (fields = {}, docAlias = 'd', stakeholderAlias =
   return rawWhereConditions
     .replace(new RegExp(`${docAlias}\\.nit`, 'gi'), `${stakeholderAlias}.nit`)
     .replace(new RegExp(`${docAlias}\\.name`, 'gi'), `${stakeholderAlias}.name`)
+    .replace(
+      new RegExp(`${docAlias}\\.stakeholder_type`, 'gi'),
+      `${stakeholderAlias}.stakeholder_type`
+    )
     .replace(
       new RegExp(`${docAlias}\\.updated_from`, 'gi'),
       toFactDateSql(`${docAlias}.fact_date`)
