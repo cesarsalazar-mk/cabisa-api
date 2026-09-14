@@ -2,56 +2,269 @@ const { types, getWhereConditions, helpers, toGuatemalaDateSql, toFactDateSql } 
 const { invoiceAdjustments } = helpers
 const { getDocumentNetAdjustmentSql } = invoiceAdjustments
 
-const CLIENT_CHARGES_SUBQUERY = `
+const CLIENT_INVOICE_TYPES_SQL = alias => `
+  (
+    ${alias}.document_type = '${types.documentsTypes.SELL_INVOICE}' OR
+    ${alias}.document_type = '${types.documentsTypes.RENT_INVOICE}'
+  )`
+
+const CLIENT_APPROVED_INVOICE_SQL = alias => `
+  ${CLIENT_INVOICE_TYPES_SQL(alias)}
+  AND ${alias}.status = '${types.documentsStatus.APPROVED}'`
+
+const CLIENT_PAYMENT_ACTIVE_SQL = alias => `
+  (${alias}.is_deleted IS NULL OR ${alias}.is_deleted = 0)`
+
+const CLIENT_NOTE_AMOUNT_SQL = `
+  SUM(
+    CAST(JSON_UNQUOTE(JSON_EXTRACT(jt.value, '$.payment_amount')) AS DECIMAL(18, 4)) *
+    CAST(JSON_UNQUOTE(JSON_EXTRACT(jt.value, '$.payment_qty')) AS DECIMAL(18, 4))
+  )`
+
+const CLIENT_DUE_DATE_SQL = alias => `
+  COALESCE(
+    DATE(${alias}.credit_due_date),
+    DATE_ADD(${toFactDateSql(`${alias}.fact_date`)}, INTERVAL COALESCE(${alias}.credit_days, 0) DAY)
+  )`
+
+const CLIENT_PAYMENTS_TO_DATE_SQL = (docAlias, asOfDateSql) => `
   COALESCE((
-    SELECT SUM(dc.total_amount + ${getDocumentNetAdjustmentSql('dc')})
-    FROM documents dc
-    WHERE (
-      dc.document_type = '${types.documentsTypes.SELL_INVOICE}' OR
-      dc.document_type = '${types.documentsTypes.RENT_INVOICE}'
-    )
-    AND dc.stakeholder_id = s.id
-    AND dc.status = '${types.documentsStatus.APPROVED}'
+    SELECT SUM(p.payment_amount)
+    FROM payments p
+    WHERE p.document_id = ${docAlias}.id
+      AND ${CLIENT_PAYMENT_ACTIVE_SQL('p')}
+      AND ${toGuatemalaDateSql('p.payment_date')} <= ${asOfDateSql}
   ), 0)`
 
-const CLIENT_OVERDUE_DAYS_THRESHOLD = 120
+const CLIENT_UNPAID_SQL = (docAlias, asOfDateSql) => `
+  (
+    ${docAlias}.total_amount
+    + ${getDocumentNetAdjustmentSql(docAlias)}
+    - ${CLIENT_PAYMENTS_TO_DATE_SQL(docAlias, asOfDateSql)}
+  )`
 
-const CLIENT_OVERDUE_DEBT_120_SUBQUERY = `
-  CASE WHEN (
-    ${CLIENT_CHARGES_SUBQUERY} - COALESCE(s.paid_credit, 0)
-  ) > 0 AND EXISTS (
-    SELECT 1
-    FROM documents dc
-    WHERE dc.stakeholder_id = s.id
-      AND (
-        dc.document_type = '${types.documentsTypes.SELL_INVOICE}' OR
-        dc.document_type = '${types.documentsTypes.RENT_INVOICE}'
-      )
-      AND dc.status = '${types.documentsStatus.APPROVED}'
-      AND DATEDIFF(
-        CURDATE(),
-        COALESCE(
-          DATE(dc.credit_due_date),
-          DATE_ADD(${toFactDateSql('dc.fact_date')}, INTERVAL COALESCE(dc.credit_days, 0) DAY)
-        )
-      ) > ${CLIENT_OVERDUE_DAYS_THRESHOLD}
-  ) THEN 1 ELSE 0 END`
+const extractClientAccountDateValue = fieldValue => {
+  if (!fieldValue) return null
 
-const parseClientAccountFilterFields = (fields = {}) => {
-  const { $limit, $offset, debt_status, ...filterFields } = fields
+  const str = String(fieldValue)
+  const colonIdx = str.indexOf(':')
 
-  return { filterFields, debt_status: debt_status || '' }
+  if (colonIdx > -1) {
+    const datePart = str
+      .substring(colonIdx + 1)
+      .replace(/['"]/g, '')
+      .trim()
+
+    if (/^\d{4}-\d{2}-\d{2}$/.test(datePart)) return datePart
+  }
+
+  const trimmed = str.replace(/['"]/g, '').trim()
+
+  return /^\d{4}-\d{2}-\d{2}$/.test(trimmed) ? trimmed : null
 }
 
-const buildClientAccountInnerQuery = (filterFields = {}) => {
-  const rawWhereConditions = getWhereConditions({
+const buildClientAccountDateFilter = (dateExpr, { startDate, endDate, beforeDate } = {}) => {
+  if (beforeDate) return ` AND ${dateExpr} < '${beforeDate}'`
+
+  let filter = ''
+
+  if (startDate) filter += ` AND ${dateExpr} >= '${startDate}'`
+  if (endDate) filter += ` AND ${dateExpr} <= '${endDate}'`
+
+  return filter
+}
+
+const buildClientAccountNotesSumSql = (stakeholderExpr, noteType, { startDate, endDate, beforeDate } = {}) => `
+  COALESCE((
+    SELECT SUM(COALESCE(note_items.note_amount, 0))
+    FROM documents_debit_credit_notes dcn
+    LEFT JOIN (
+      SELECT
+        dcn2.id,
+        ${CLIENT_NOTE_AMOUNT_SQL} AS note_amount
+      FROM documents_debit_credit_notes dcn2
+      JOIN JSON_TABLE(
+        JSON_EXTRACT(dcn2.request_detail, '$.invoice.items'),
+        '$[*]' COLUMNS (value JSON PATH '$')
+      ) AS jt
+      WHERE dcn2.error = 'NO ERRORS'
+      GROUP BY dcn2.id
+    ) note_items ON note_items.id = dcn.id
+    WHERE dcn.stakeholder_id = ${stakeholderExpr}
+      AND dcn.error = 'NO ERRORS'
+      AND dcn.document_type = '${noteType}'
+      ${buildClientAccountDateFilter(toGuatemalaDateSql('dcn.created_at'), { startDate, endDate, beforeDate })}
+  ), 0)`
+
+const buildClientAccountInvoicesSumSql = (stakeholderExpr, { startDate, endDate, beforeDate } = {}) => `
+  COALESCE((
+    SELECT SUM(dc.total_amount)
+    FROM documents dc
+    WHERE dc.stakeholder_id = ${stakeholderExpr}
+      AND ${CLIENT_APPROVED_INVOICE_SQL('dc')}
+      ${buildClientAccountDateFilter(toFactDateSql('dc.fact_date'), { startDate, endDate, beforeDate })}
+  ), 0)`
+
+const buildClientAccountPaymentsSumSql = (stakeholderExpr, { startDate, endDate, beforeDate } = {}) => `
+  COALESCE((
+    SELECT SUM(p.payment_amount)
+    FROM payments p
+    JOIN documents dc ON dc.id = p.document_id
+    WHERE dc.stakeholder_id = ${stakeholderExpr}
+      AND ${CLIENT_APPROVED_INVOICE_SQL('dc')}
+      AND ${CLIENT_PAYMENT_ACTIVE_SQL('p')}
+      ${buildClientAccountDateFilter(toGuatemalaDateSql('p.payment_date'), { startDate, endDate, beforeDate })}
+  ), 0)`
+
+const buildClientAccountNotesAgg = (asOfDateSql = 'CURDATE()') => `
+  SELECT
+    dcn.stakeholder_id,
+    COALESCE(
+      SUM(
+        CASE
+          WHEN dcn.document_type = 'DEBITO' THEN COALESCE(note_items.note_amount, 0)
+          ELSE 0
+        END
+      ),
+      0
+    ) AS debit_total,
+    COALESCE(
+      SUM(
+        CASE
+          WHEN dcn.document_type = 'CREDITO' THEN COALESCE(note_items.note_amount, 0)
+          ELSE 0
+        END
+      ),
+      0
+    ) AS credit_total
+  FROM documents_debit_credit_notes dcn
+  LEFT JOIN (
+    SELECT
+      dcn2.id,
+      ${CLIENT_NOTE_AMOUNT_SQL} AS note_amount
+    FROM documents_debit_credit_notes dcn2
+    JOIN JSON_TABLE(
+      JSON_EXTRACT(dcn2.request_detail, '$.invoice.items'),
+      '$[*]' COLUMNS (value JSON PATH '$')
+    ) AS jt
+    WHERE dcn2.error = 'NO ERRORS'
+    GROUP BY dcn2.id
+  ) note_items ON note_items.id = dcn.id
+  WHERE dcn.error = 'NO ERRORS'
+    AND ${toGuatemalaDateSql('dcn.created_at')} <= ${asOfDateSql}
+  GROUP BY dcn.stakeholder_id`
+
+const buildClientAccountBalanceAgg = (asOfDateSql = 'CURDATE()') => `
+  SELECT
+    base.stakeholder_id,
+    (
+      COALESCE(base.invoice_total, 0)
+      + COALESCE(notes.debit_total, 0)
+      - COALESCE(notes.credit_total, 0)
+      - COALESCE(base.paid_amount, 0)
+    ) AS balance,
+    COALESCE(base.aging_0_30, 0) AS aging_0_30,
+    COALESCE(base.aging_31_60, 0) AS aging_31_60,
+    COALESCE(base.aging_61_90, 0) AS aging_61_90,
+    COALESCE(base.aging_over_90, 0) AS aging_over_90,
+    COALESCE(base.max_days_overdue, 0) AS max_days_overdue,
+    base.next_due_date,
+    COALESCE(base.unpaid_invoices_count, 0) AS unpaid_invoices_count,
+    COALESCE(base.paid_invoices_count, 0) AS paid_invoices_count,
+    COALESCE(base.paid_amount, 0) AS total_paid
+  FROM (
+    SELECT
+      aged.stakeholder_id,
+      COALESCE(SUM(aged.invoice_total), 0) AS invoice_total,
+      COALESCE(SUM(aged.paid_amount), 0) AS paid_amount,
+      COALESCE(SUM(CASE WHEN aged.unpaid > 0.009 AND aged.age_days <= 30 THEN aged.unpaid ELSE 0 END), 0) AS aging_0_30,
+      COALESCE(SUM(CASE WHEN aged.unpaid > 0.009 AND aged.age_days > 30 AND aged.age_days <= 60 THEN aged.unpaid ELSE 0 END), 0) AS aging_31_60,
+      COALESCE(SUM(CASE WHEN aged.unpaid > 0.009 AND aged.age_days > 60 AND aged.age_days <= 90 THEN aged.unpaid ELSE 0 END), 0) AS aging_61_90,
+      COALESCE(SUM(CASE WHEN aged.unpaid > 0.009 AND aged.age_days > 90 THEN aged.unpaid ELSE 0 END), 0) AS aging_over_90,
+      COALESCE(MAX(CASE WHEN aged.unpaid > 0.009 THEN aged.age_days ELSE NULL END), 0) AS max_days_overdue,
+      MIN(CASE WHEN aged.unpaid > 0.009 THEN aged.due_date ELSE NULL END) AS next_due_date,
+      COUNT(CASE WHEN aged.unpaid > 0.009 THEN 1 ELSE NULL END) AS unpaid_invoices_count,
+      COUNT(CASE WHEN aged.unpaid <= 0.009 THEN 1 ELSE NULL END) AS paid_invoices_count
+    FROM (
+      SELECT
+        dc.stakeholder_id,
+        dc.total_amount AS invoice_total,
+        ${CLIENT_UNPAID_SQL('dc', asOfDateSql)} AS unpaid,
+        ${CLIENT_PAYMENTS_TO_DATE_SQL('dc', asOfDateSql)} AS paid_amount,
+        ${CLIENT_DUE_DATE_SQL('dc')} AS due_date,
+        DATEDIFF(${asOfDateSql}, ${CLIENT_DUE_DATE_SQL('dc')}) AS age_days
+      FROM documents dc
+      WHERE ${CLIENT_APPROVED_INVOICE_SQL('dc')}
+        AND ${toFactDateSql('dc.fact_date')} <= ${asOfDateSql}
+    ) aged
+    GROUP BY aged.stakeholder_id
+  ) base
+  LEFT JOIN (${buildClientAccountNotesAgg(asOfDateSql)}) notes
+    ON notes.stakeholder_id = base.stakeholder_id`
+
+const buildClientAccountLastInvoiceAgg = () => `
+  SELECT
+    dc.stakeholder_id,
+    MAX(${toFactDateSql('dc.fact_date')}) AS last_invoice_date
+  FROM documents dc
+  WHERE ${CLIENT_APPROVED_INVOICE_SQL('dc')}
+  GROUP BY dc.stakeholder_id`
+
+const buildClientAccountLastNoteAgg = () => `
+  SELECT
+    dcn.stakeholder_id,
+    MAX(${toGuatemalaDateSql('dcn.created_at')}) AS last_note_date
+  FROM documents_debit_credit_notes dcn
+  WHERE dcn.error = 'NO ERRORS'
+  GROUP BY dcn.stakeholder_id`
+
+const buildClientAccountLastPaymentAgg = () => `
+  SELECT
+    ranked.stakeholder_id,
+    ranked.payment_date AS last_payment_date,
+    ranked.document_number AS last_payment_document
+  FROM (
+    SELECT
+      dc.stakeholder_id,
+      ${toGuatemalaDateSql('p.payment_date')} AS payment_date,
+      CASE
+        WHEN dc.document_number IS NOT NULL AND dc.document_number <> '' THEN dc.document_number
+        ELSE CAST(dc.id AS CHAR)
+      END AS document_number,
+      ROW_NUMBER() OVER (
+        PARTITION BY dc.stakeholder_id
+        ORDER BY ${toGuatemalaDateSql('p.payment_date')} DESC, p.id DESC
+      ) AS rn
+    FROM payments p
+    JOIN documents dc ON dc.id = p.document_id
+    WHERE ${CLIENT_APPROVED_INVOICE_SQL('dc')}
+      AND ${CLIENT_PAYMENT_ACTIVE_SQL('p')}
+  ) ranked
+  WHERE ranked.rn = 1`
+
+const parseClientAccountFilterFields = (fields = {}) => {
+  const { $limit, $offset, debt_status, start_date, end_date, as_of_date, ...filterFields } = fields
+  const asOfDate =
+    extractClientAccountDateValue(as_of_date) ||
+    extractClientAccountDateValue(end_date) ||
+    null
+
+  return {
+    filterFields,
+    debt_status: debt_status || '',
+    startDate: extractClientAccountDateValue(start_date),
+    endDate: extractClientAccountDateValue(end_date),
+    asOfDate,
+  }
+}
+
+const buildClientAccountInnerQuery = (filterFields = {}, asOfDate = null) => {
+  const whereConditions = getWhereConditions({
     fields: filterFields,
     tableAlias: 's',
     hasPreviousConditions: false,
   })
-  const whereConditions = rawWhereConditions
-    .replace(/s\.start_date/gi, toGuatemalaDateSql('s.created_at'))
-    .replace(/s\.end_date/gi, toGuatemalaDateSql('s.created_at'))
+  const asOfDateSql = asOfDate ? `'${asOfDate}'` : 'CURDATE()'
 
   return `
     SELECT
@@ -72,17 +285,89 @@ const buildClientAccountInnerQuery = (filterFields = {}) => {
       s.business_man,
       s.payments_man,
       CASE WHEN s.credit_limit IS NULL THEN 0 ELSE s.credit_limit END AS credit_limit,
-      CASE WHEN s.total_credit IS NULL THEN 0 ELSE s.total_credit END AS total_credit,
-      CASE WHEN s.paid_credit IS NULL THEN 0 ELSE s.paid_credit END AS paid_credit,
       s.block_reason,
       s.created_at,
       s.created_by,
       s.updated_at,
       s.updated_by,
-      ${CLIENT_CHARGES_SUBQUERY} AS total_charge,
-      ${CLIENT_OVERDUE_DEBT_120_SUBQUERY} AS has_overdue_debt_120
+      COALESCE(bal.balance, 0) AS balance,
+      COALESCE(bal.aging_0_30, 0) AS aging_0_30,
+      COALESCE(bal.aging_31_60, 0) AS aging_31_60,
+      COALESCE(bal.aging_61_90, 0) AS aging_61_90,
+      COALESCE(bal.aging_over_90, 0) AS aging_over_90,
+      COALESCE(bal.max_days_overdue, 0) AS max_days_overdue,
+      bal.next_due_date,
+      COALESCE(bal.unpaid_invoices_count, 0) AS unpaid_invoices_count,
+      COALESCE(bal.paid_invoices_count, 0) AS paid_invoices_count,
+      COALESCE(bal.total_paid, 0) AS total_paid,
+      last_pay.last_payment_date,
+      last_pay.last_payment_document,
+      (
+        SELECT MAX(movement_date)
+        FROM (
+          SELECT last_inv.last_invoice_date AS movement_date
+          UNION ALL
+          SELECT last_pay.last_payment_date
+          UNION ALL
+          SELECT last_note.last_note_date
+        ) movement_dates
+      ) AS last_movement_date,
+      CASE
+        WHEN COALESCE(bal.balance, 0) <= 0 THEN 'AL_DIA'
+        WHEN COALESCE(bal.max_days_overdue, 0) > 90 THEN 'VENCIDO_90'
+        WHEN COALESCE(bal.max_days_overdue, 0) > 0 THEN 'VENCIDO'
+        ELSE 'POR_VENCER'
+      END AS account_status
     FROM stakeholders s
+    LEFT JOIN (${buildClientAccountBalanceAgg(asOfDateSql)}) bal ON bal.stakeholder_id = s.id
+    LEFT JOIN (${buildClientAccountLastInvoiceAgg()}) last_inv ON last_inv.stakeholder_id = s.id
+    LEFT JOIN (${buildClientAccountLastPaymentAgg()}) last_pay ON last_pay.stakeholder_id = s.id
+    LEFT JOIN (${buildClientAccountLastNoteAgg()}) last_note ON last_note.stakeholder_id = s.id
     ${whereConditions}
+  `
+}
+
+const buildClientAccountDebtFilter = (debtStatus = '') => {
+  if (
+    debtStatus === 'WITH_DEBT' ||
+    debtStatus === 'UNPAID' ||
+    debtStatus === 'PENDING'
+  ) {
+    return " AND clients.account_status <> 'AL_DIA'"
+  }
+
+  if (debtStatus === 'OVERDUE' || debtStatus === 'WITH_DEBT_OVER_120') {
+    return " AND clients.account_status IN ('VENCIDO', 'VENCIDO_90')"
+  }
+
+  if (debtStatus === 'WITH_DEBT_OVER_90' || debtStatus === 'VENCIDO_90') {
+    return " AND clients.account_status = 'VENCIDO_90'"
+  }
+
+  if (
+    debtStatus === 'WITHOUT_DEBT' ||
+    debtStatus === 'AL_DIA' ||
+    debtStatus === 'PAID'
+  ) {
+    return " AND clients.account_status = 'AL_DIA'"
+  }
+
+  return ''
+}
+
+const buildClientAccountFilteredClientsSubquery = (fields = {}) => {
+  const { filterFields, debt_status, asOfDate } = parseClientAccountFilterFields(
+    stripPaginationFields(fields)
+  )
+  const debtFilter = buildClientAccountDebtFilter(debt_status)
+
+  return `
+    SELECT
+      clients.*
+    FROM (
+      ${buildClientAccountInnerQuery(filterFields, asOfDate)}
+    ) clients
+    WHERE 1=1 ${debtFilter}
   `
 }
 
@@ -95,41 +380,17 @@ const buildClientAccountOuterQuery = (fields = {}, { withPagination = true } = {
     FROM (
       ${buildClientAccountFilteredClientsSubquery(fields)}
     ) filtered_clients
-    ORDER BY filtered_clients.id DESC
+    ORDER BY
+      CASE filtered_clients.account_status
+        WHEN 'VENCIDO_90' THEN 1
+        WHEN 'VENCIDO' THEN 2
+        WHEN 'POR_VENCER' THEN 3
+        ELSE 4
+      END,
+      filtered_clients.max_days_overdue DESC,
+      filtered_clients.balance DESC,
+      filtered_clients.name ASC
     ${paginationSQL}
-  `
-}
-
-const buildClientAccountDebtFilter = (debtStatus = '') => {
-  if (debtStatus === 'WITH_DEBT') {
-    return ' AND (clients.total_charge - clients.paid_credit) > 0'
-  }
-
-  if (debtStatus === 'WITH_DEBT_OVER_120') {
-    return ' AND clients.has_overdue_debt_120 = 1'
-  }
-
-  if (debtStatus === 'WITHOUT_DEBT') {
-    return ' AND (clients.total_charge - clients.paid_credit) <= 0'
-  }
-
-  return ''
-}
-
-const buildClientAccountFilteredClientsSubquery = (fields = {}) => {
-  const { filterFields, debt_status } = parseClientAccountFilterFields(
-    stripPaginationFields(fields)
-  )
-  const debtFilter = buildClientAccountDebtFilter(debt_status)
-
-  return `
-    SELECT
-      clients.*,
-      (clients.total_charge - clients.paid_credit) AS credit_balance_raw
-    FROM (
-      ${buildClientAccountInnerQuery(filterFields)}
-    ) clients
-    WHERE 1=1 ${debtFilter}
   `
 }
 
@@ -144,58 +405,461 @@ const getClientAccountStateCount = (fields = {}) => `
 
 const getClientAccountStateSummary = (fields = {}) => `
   SELECT
-    COUNT(*) AS total_clients,
-    SUM(CASE WHEN (filtered_clients.total_charge - filtered_clients.paid_credit) > 0 THEN 1 ELSE 0 END) AS clients_with_debt,
-    SUM(CASE WHEN (filtered_clients.total_charge - filtered_clients.paid_credit) <= 0 THEN 1 ELSE 0 END) AS clients_without_debt,
-    SUM(filtered_clients.total_charge) AS total_credit,
-    SUM(filtered_clients.paid_credit) AS total_paid_credit,
-    SUM(filtered_clients.total_charge - filtered_clients.paid_credit) AS total_credit_balance,
-    SUM(
-      CASE
-        WHEN (filtered_clients.total_charge - filtered_clients.paid_credit) > 0
-        THEN (filtered_clients.total_charge - filtered_clients.paid_credit)
-        ELSE 0
-      END
-    ) AS total_debt_balance,
-    SUM(
-      CASE
-        WHEN (filtered_clients.total_charge - filtered_clients.paid_credit) > 0
-        THEN filtered_clients.total_charge
-        ELSE 0
-      END
-    ) AS total_debt_charge,
-    SUM(
-      CASE
-        WHEN (filtered_clients.total_charge - filtered_clients.paid_credit) > 0
-        THEN filtered_clients.paid_credit
-        ELSE 0
-      END
-    ) AS total_debt_paid,
-    SUM(
-      CASE
-        WHEN (filtered_clients.total_charge - filtered_clients.paid_credit) <= 0
-        THEN (filtered_clients.total_charge - filtered_clients.paid_credit)
-        ELSE 0
-      END
-    ) AS total_without_debt_balance,
-    SUM(
-      CASE
-        WHEN (filtered_clients.total_charge - filtered_clients.paid_credit) <= 0
-        THEN filtered_clients.total_charge
-        ELSE 0
-      END
-    ) AS total_without_debt_charge,
-    SUM(
-      CASE
-        WHEN (filtered_clients.total_charge - filtered_clients.paid_credit) <= 0
-        THEN filtered_clients.paid_credit
-        ELSE 0
-      END
-    ) AS total_without_debt_paid
+    client_summary.total_clients,
+    client_summary.clients_with_debt,
+    client_summary.clients_without_debt,
+    client_summary.clients_overdue,
+    client_summary.clients_overdue_90,
+    client_summary.total_balance,
+    client_summary.total_debt_balance,
+    client_summary.total_paid,
+    client_summary.total_unpaid_invoices,
+    client_summary.total_paid_invoices,
+    client_summary.total_aging_0_30,
+    client_summary.total_aging_31_60,
+    client_summary.total_aging_61_90,
+    client_summary.total_aging_over_90,
+    invoice_summary.total_invoices_count,
+    invoice_summary.total_invoiced_amount,
+    invoice_summary.cancelled_invoices_count,
+    invoice_summary.cancelled_invoices_amount,
+    invoice_summary.approved_invoices_count,
+    invoice_summary.approved_invoices_amount
   FROM (
-    ${buildClientAccountFilteredClientsSubquery(fields)}
-  ) filtered_clients;
+    SELECT
+      COUNT(*) AS total_clients,
+      SUM(CASE WHEN filtered_clients.account_status <> 'AL_DIA' THEN 1 ELSE 0 END) AS clients_with_debt,
+      SUM(CASE WHEN filtered_clients.account_status = 'AL_DIA' THEN 1 ELSE 0 END) AS clients_without_debt,
+      SUM(CASE WHEN filtered_clients.account_status IN ('VENCIDO', 'VENCIDO_90') THEN 1 ELSE 0 END) AS clients_overdue,
+      SUM(CASE WHEN filtered_clients.account_status = 'VENCIDO_90' THEN 1 ELSE 0 END) AS clients_overdue_90,
+      SUM(filtered_clients.balance) AS total_balance,
+      SUM(
+        CASE
+          WHEN filtered_clients.balance > 0 THEN filtered_clients.balance
+          ELSE 0
+        END
+      ) AS total_debt_balance,
+      SUM(filtered_clients.total_paid) AS total_paid,
+      SUM(filtered_clients.unpaid_invoices_count) AS total_unpaid_invoices,
+      SUM(filtered_clients.paid_invoices_count) AS total_paid_invoices,
+      SUM(filtered_clients.aging_0_30) AS total_aging_0_30,
+      SUM(filtered_clients.aging_31_60) AS total_aging_31_60,
+      SUM(filtered_clients.aging_61_90) AS total_aging_61_90,
+      SUM(filtered_clients.aging_over_90) AS total_aging_over_90
+    FROM (
+      ${buildClientAccountFilteredClientsSubquery(fields)}
+    ) filtered_clients
+  ) client_summary
+  CROSS JOIN (
+    SELECT
+      COUNT(*) AS total_invoices_count,
+      COALESCE(
+        SUM(d.total_amount + ${getDocumentNetAdjustmentSql('d')}),
+        0
+      ) AS total_invoiced_amount,
+      COALESCE(
+        SUM(CASE WHEN d.status = '${types.documentsStatus.CANCELLED}' THEN 1 ELSE 0 END),
+        0
+      ) AS cancelled_invoices_count,
+      COALESCE(
+        SUM(
+          CASE
+            WHEN d.status = '${types.documentsStatus.CANCELLED}'
+            THEN d.total_amount + ${getDocumentNetAdjustmentSql('d')}
+            ELSE 0
+          END
+        ),
+        0
+      ) AS cancelled_invoices_amount,
+      COALESCE(
+        SUM(CASE WHEN d.status = '${types.documentsStatus.APPROVED}' THEN 1 ELSE 0 END),
+        0
+      ) AS approved_invoices_count,
+      COALESCE(
+        SUM(
+          CASE
+            WHEN d.status = '${types.documentsStatus.APPROVED}'
+            THEN d.total_amount + ${getDocumentNetAdjustmentSql('d')}
+            ELSE 0
+          END
+        ),
+        0
+      ) AS approved_invoices_amount
+    FROM documents d
+    INNER JOIN (
+      ${buildClientAccountFilteredClientsSubquery(fields)}
+    ) filtered_clients ON filtered_clients.id = d.stakeholder_id
+    WHERE ${CLIENT_INVOICE_TYPES_SQL('d')}
+      AND d.status IN (
+        '${types.documentsStatus.APPROVED}',
+        '${types.documentsStatus.CANCELLED}'
+      )
+  ) invoice_summary;
 `
+
+const buildClientAccountInvoicesBase = (fields = {}) => {
+  const stakeholderId = String(fields.stakeholder_id || '').replace(/[^\d]/g, '')
+  const paymentStatus = String(fields.payment_status || 'ALL').toUpperCase()
+  const documentNumber = String(fields.document_number || '')
+    .trim()
+    .replace(/'/g, "''")
+  const asOfDate =
+    extractClientAccountDateValue(fields.as_of_date) ||
+    extractClientAccountDateValue(fields.end_date)
+  const asOfDateSql = asOfDate ? `'${asOfDate}'` : 'CURDATE()'
+
+  let paymentFilter = ''
+  if (paymentStatus === 'UNPAID' || paymentStatus === 'PENDING') {
+    paymentFilter = 'WHERE invoice.unpaid_amount > 0.009'
+  } else if (paymentStatus === 'PAID') {
+    paymentFilter = 'WHERE invoice.unpaid_amount <= 0.009'
+  }
+
+  const documentNumberFilter = documentNumber
+    ? `${
+        paymentFilter ? 'AND' : 'WHERE'
+      } CONVERT(invoice.document_number USING utf8mb4) COLLATE utf8mb4_unicode_ci LIKE CONCAT('%', CONVERT('${documentNumber}' USING utf8mb4) COLLATE utf8mb4_unicode_ci, '%')`
+    : ''
+
+  const fromSql = `
+    FROM (
+      SELECT
+        dc.id,
+        CASE
+          WHEN dc.document_number IS NOT NULL AND dc.document_number <> ''
+            THEN CONVERT(dc.document_number USING utf8mb4) COLLATE utf8mb4_unicode_ci
+          ELSE CONVERT(CAST(dc.id AS CHAR) USING utf8mb4) COLLATE utf8mb4_unicode_ci
+        END AS document_number,
+        dc.serie,
+        ${toFactDateSql('dc.fact_date')} AS document_date,
+        ${CLIENT_DUE_DATE_SQL('dc')} AS due_date,
+        (dc.total_amount + ${getDocumentNetAdjustmentSql('dc')}) AS total_amount,
+        ${CLIENT_PAYMENTS_TO_DATE_SQL('dc', asOfDateSql)} AS paid_amount,
+        ${CLIENT_UNPAID_SQL('dc', asOfDateSql)} AS unpaid_amount,
+        (
+          SELECT MAX(${toGuatemalaDateSql('p.payment_date')})
+          FROM payments p
+          WHERE p.document_id = dc.id
+            AND ${CLIENT_PAYMENT_ACTIVE_SQL('p')}
+            AND ${toGuatemalaDateSql('p.payment_date')} <= ${asOfDateSql}
+        ) AS last_payment_date,
+        DATEDIFF(${asOfDateSql}, ${CLIENT_DUE_DATE_SQL('dc')}) AS days_overdue
+      FROM documents dc
+      WHERE dc.stakeholder_id = ${stakeholderId || 0}
+        AND ${CLIENT_APPROVED_INVOICE_SQL('dc')}
+        AND ${toFactDateSql('dc.fact_date')} <= ${asOfDateSql}
+    ) invoice
+    ${paymentFilter}
+    ${documentNumberFilter}
+  `
+
+  return { stakeholderId, fromSql }
+}
+
+const getClientAccountInvoices = (fields = {}) => {
+  const { stakeholderId, fromSql } = buildClientAccountInvoicesBase(fields)
+  const paginationSQL = buildPaginationSQL(fields)
+
+  if (!stakeholderId) {
+    return `
+      SELECT
+        NULL AS id,
+        NULL AS document_number,
+        NULL AS serie,
+        NULL AS document_date,
+        NULL AS due_date,
+        0 AS total_amount,
+        0 AS paid_amount,
+        0 AS unpaid_amount,
+        NULL AS last_payment_date,
+        0 AS days_overdue,
+        'UNPAID' AS payment_status
+      WHERE 1 = 0;`
+  }
+
+  return `
+    SELECT
+      invoice.id,
+      invoice.document_number,
+      invoice.serie,
+      invoice.document_date,
+      invoice.due_date,
+      invoice.total_amount,
+      invoice.paid_amount,
+      invoice.unpaid_amount,
+      invoice.last_payment_date,
+      invoice.days_overdue,
+      CASE
+        WHEN invoice.unpaid_amount > 0.009 THEN 'UNPAID'
+        ELSE 'PAID'
+      END AS payment_status
+    ${fromSql}
+    ORDER BY
+      CASE WHEN invoice.unpaid_amount > 0.009 THEN 0 ELSE 1 END,
+      invoice.due_date ASC,
+      invoice.id ASC
+    ${paginationSQL};
+  `
+}
+
+const getClientAccountInvoicesCount = (fields = {}) => {
+  const { stakeholderId, fromSql } = buildClientAccountInvoicesBase(fields)
+
+  if (!stakeholderId) {
+    return `
+      SELECT
+        0 AS total,
+        0 AS total_unpaid_amount,
+        0 AS total_paid_amount;`
+  }
+
+  return `
+    SELECT
+      COUNT(*) AS total,
+      COALESCE(SUM(invoice.unpaid_amount), 0) AS total_unpaid_amount,
+      COALESCE(SUM(invoice.paid_amount), 0) AS total_paid_amount
+    ${fromSql};
+  `
+}
+
+const getClientAccountUnpaidInvoices = (fields = {}) =>
+  getClientAccountInvoices({ ...fields, payment_status: 'UNPAID' })
+
+const getClientAccountInvoicePayments = (fields = {}) => {
+  const stakeholderId = String(fields.stakeholder_id || '').replace(/[^\d]/g, '')
+  const rawIds = fields.document_ids || fields.document_id || ''
+  const documentIds = String(rawIds)
+    .split(',')
+    .map(id => id.replace(/[^\d]/g, ''))
+    .filter(Boolean)
+
+  if (!stakeholderId) {
+    return `
+      SELECT
+        NULL AS payment_id,
+        NULL AS document_id,
+        NULL AS document_number,
+        NULL AS payment_date,
+        0 AS payment_amount,
+        NULL AS reference
+      WHERE 1 = 0;`
+  }
+
+  const documentFilter = documentIds.length
+    ? `AND dc.id IN (${documentIds.join(', ')})`
+    : ''
+
+  return `
+    SELECT
+      p.id AS payment_id,
+      dc.id AS document_id,
+      CASE
+        WHEN dc.document_number IS NOT NULL AND dc.document_number <> '' THEN dc.document_number
+        ELSE CAST(dc.id AS CHAR)
+      END AS document_number,
+      p.payment_date,
+      p.payment_amount,
+      CASE
+        WHEN p.related_external_document IS NOT NULL AND p.related_external_document <> ''
+          THEN CAST(p.related_external_document AS CHAR)
+        WHEN p.description IS NOT NULL AND p.description <> ''
+          THEN CAST(p.description AS CHAR)
+        WHEN p.payment_method IS NOT NULL
+          THEN CAST(p.payment_method AS CHAR)
+        ELSE ''
+      END AS reference
+    FROM payments p
+    JOIN documents dc ON dc.id = p.document_id
+    WHERE dc.stakeholder_id = ${stakeholderId}
+      AND ${CLIENT_APPROVED_INVOICE_SQL('dc')}
+      AND ${CLIENT_PAYMENT_ACTIVE_SQL('p')}
+      ${documentFilter}
+    ORDER BY ${toGuatemalaDateSql('p.payment_date')} ASC, p.id ASC;
+  `
+}
+
+const getClientAccountOpeningBalance = (fields = {}) => {
+  const stakeholderId = String(fields.stakeholder_id || '').replace(/[^\d]/g, '')
+  const startDate = extractClientAccountDateValue(fields.start_date)
+
+  if (!stakeholderId || !startDate) {
+    return 'SELECT 0 AS opening_balance;'
+  }
+
+  const beforeFilter = { beforeDate: startDate }
+
+  return `
+    SELECT
+      (
+        ${buildClientAccountInvoicesSumSql(stakeholderId, beforeFilter)}
+        + ${buildClientAccountNotesSumSql(stakeholderId, 'DEBITO', beforeFilter)}
+        - ${buildClientAccountNotesSumSql(stakeholderId, 'CREDITO', beforeFilter)}
+        - ${buildClientAccountPaymentsSumSql(stakeholderId, beforeFilter)}
+      ) AS opening_balance;
+  `
+}
+
+const getClientAccountInvoiceMovements = (fields = {}) => {
+  const stakeholderId = String(fields.stakeholder_id || '').replace(/[^\d]/g, '')
+  const startDate = extractClientAccountDateValue(fields.start_date)
+  const endDate = extractClientAccountDateValue(fields.end_date)
+  const periodFilter = { startDate, endDate }
+
+  if (!stakeholderId) {
+    return `
+      SELECT
+        NULL AS movement_date,
+        'INVOICE' AS movement_type,
+        NULL AS document_number,
+        NULL AS reference,
+        0 AS charge_amount,
+        0 AS credit_amount,
+        0 AS sort_id
+      WHERE 1 = 0;`
+  }
+
+  return `
+    SELECT
+      ${toFactDateSql('dc.fact_date')} AS movement_date,
+      'INVOICE' AS movement_type,
+      CASE
+        WHEN dc.document_number IS NOT NULL AND dc.document_number <> '' THEN dc.document_number
+        ELSE CAST(dc.id AS CHAR)
+      END AS document_number,
+      CASE
+        WHEN dc.serie IS NOT NULL AND dc.serie <> '' THEN CAST(dc.serie AS CHAR)
+        WHEN dc.description IS NOT NULL AND dc.description <> '' THEN CAST(dc.description AS CHAR)
+        ELSE ''
+      END AS reference,
+      dc.total_amount AS charge_amount,
+      0 AS credit_amount,
+      dc.id AS sort_id
+    FROM documents dc
+    WHERE dc.stakeholder_id = ${stakeholderId}
+      AND ${CLIENT_APPROVED_INVOICE_SQL('dc')}
+      ${buildClientAccountDateFilter(toFactDateSql('dc.fact_date'), periodFilter)}
+    ORDER BY ${toFactDateSql('dc.fact_date')} ASC, dc.id ASC;
+  `
+}
+
+const getClientAccountPaymentMovements = (fields = {}) => {
+  const stakeholderId = String(fields.stakeholder_id || '').replace(/[^\d]/g, '')
+  const startDate = extractClientAccountDateValue(fields.start_date)
+  const endDate = extractClientAccountDateValue(fields.end_date)
+  const periodFilter = { startDate, endDate }
+
+  if (!stakeholderId) {
+    return `
+      SELECT
+        NULL AS movement_date,
+        'PAYMENT' AS movement_type,
+        NULL AS document_number,
+        NULL AS reference,
+        0 AS charge_amount,
+        0 AS credit_amount,
+        0 AS sort_id
+      WHERE 1 = 0;`
+  }
+
+  return `
+    SELECT
+      p.payment_date AS movement_date,
+      'PAYMENT' AS movement_type,
+      CASE
+        WHEN dc.document_number IS NOT NULL AND dc.document_number <> '' THEN dc.document_number
+        ELSE CAST(dc.id AS CHAR)
+      END AS document_number,
+      CASE
+        WHEN p.related_external_document IS NOT NULL AND p.related_external_document <> ''
+          THEN CAST(p.related_external_document AS CHAR)
+        WHEN p.description IS NOT NULL AND p.description <> ''
+          THEN CAST(p.description AS CHAR)
+        WHEN p.payment_method IS NOT NULL
+          THEN CAST(p.payment_method AS CHAR)
+        ELSE ''
+      END AS reference,
+      0 AS charge_amount,
+      p.payment_amount AS credit_amount,
+      p.id AS sort_id
+    FROM payments p
+    JOIN documents dc ON dc.id = p.document_id
+    WHERE dc.stakeholder_id = ${stakeholderId}
+      AND ${CLIENT_APPROVED_INVOICE_SQL('dc')}
+      AND ${CLIENT_PAYMENT_ACTIVE_SQL('p')}
+      ${buildClientAccountDateFilter(toGuatemalaDateSql('p.payment_date'), periodFilter)}
+    ORDER BY ${toGuatemalaDateSql('p.payment_date')} ASC, p.id ASC;
+  `
+}
+
+const getClientAccountNoteMovements = (fields = {}) => {
+  const stakeholderId = String(fields.stakeholder_id || '').replace(/[^\d]/g, '')
+  const startDate = extractClientAccountDateValue(fields.start_date)
+  const endDate = extractClientAccountDateValue(fields.end_date)
+  const periodFilter = { startDate, endDate }
+
+  if (!stakeholderId) {
+    return `
+      SELECT
+        NULL AS movement_date,
+        'CREDIT_NOTE' AS movement_type,
+        NULL AS document_number,
+        NULL AS reference,
+        0 AS charge_amount,
+        0 AS credit_amount,
+        0 AS sort_id
+      WHERE 1 = 0;`
+  }
+
+  return `
+    SELECT
+      dcn.created_at AS movement_date,
+      CASE
+        WHEN dcn.document_type = 'CREDITO' THEN 'CREDIT_NOTE'
+        ELSE 'DEBIT_NOTE'
+      END AS movement_type,
+      CASE
+        WHEN dcn.document_number IS NOT NULL AND dcn.document_number <> '' THEN dcn.document_number
+        ELSE CAST(dcn.id AS CHAR)
+      END AS document_number,
+      CASE
+        WHEN dcn.related_bill_document_number IS NOT NULL AND dcn.related_bill_document_number <> ''
+          THEN CAST(dcn.related_bill_document_number AS CHAR)
+        WHEN dcn.serie IS NOT NULL AND dcn.serie <> ''
+          THEN CAST(dcn.serie AS CHAR)
+        WHEN dcn.adjustment_reason IS NOT NULL AND dcn.adjustment_reason <> ''
+          THEN CAST(dcn.adjustment_reason AS CHAR)
+        ELSE ''
+      END AS reference,
+      CASE
+        WHEN dcn.document_type = 'DEBITO' THEN COALESCE(note_items.note_amount, 0)
+        ELSE 0
+      END AS charge_amount,
+      CASE
+        WHEN dcn.document_type = 'CREDITO' THEN COALESCE(note_items.note_amount, 0)
+        ELSE 0
+      END AS credit_amount,
+      dcn.id AS sort_id
+    FROM documents_debit_credit_notes dcn
+    LEFT JOIN (
+      SELECT
+        dcn2.id,
+        ${CLIENT_NOTE_AMOUNT_SQL} AS note_amount
+      FROM documents_debit_credit_notes dcn2
+      JOIN JSON_TABLE(
+        JSON_EXTRACT(dcn2.request_detail, '$.invoice.items'),
+        '$[*]' COLUMNS (value JSON PATH '$')
+      ) AS jt
+      WHERE dcn2.error = 'NO ERRORS'
+      GROUP BY dcn2.id
+    ) note_items ON note_items.id = dcn.id
+    WHERE dcn.stakeholder_id = ${stakeholderId}
+      AND dcn.error = 'NO ERRORS'
+      ${buildClientAccountDateFilter(toGuatemalaDateSql('dcn.created_at'), periodFilter)}
+    ORDER BY ${toGuatemalaDateSql('dcn.created_at')} ASC, dcn.id ASC;
+  `
+}
+
+const getClientAccountMovements = fields => getClientAccountInvoiceMovements(fields)
 
 const getAccountsReceivable = (fields = {}) => {
   const rawWhereConditions = getWhereConditions({ fields, tableAlias: 'd' })
@@ -537,8 +1201,14 @@ const buildInvoiceReportWhere = (fields = {}, docAlias = 'd', stakeholderAlias =
       new RegExp(`${docAlias}\\.updated_to`, 'gi'),
       toFactDateSql(`${docAlias}.fact_date`)
     )
-    .replace(new RegExp(`${docAlias}\\.start_date`, 'gi'), toGuatemalaDateSql(`${docAlias}.created_at`))
-    .replace(new RegExp(`${docAlias}\\.end_date`, 'gi'), toGuatemalaDateSql(`${docAlias}.created_at`))
+    .replace(
+      new RegExp(`${docAlias}\\.start_date`, 'gi'),
+      toFactDateSql(`${docAlias}.fact_date`)
+    )
+    .replace(
+      new RegExp(`${docAlias}\\.end_date`, 'gi'),
+      toFactDateSql(`${docAlias}.fact_date`)
+    )
 }
 
 const getInvoice = (fields = {}) => {
@@ -594,8 +1264,6 @@ const getInvoice = (fields = {}) => {
             ELSE 'NO DISPONIBLE' END as payment_method_spanish,
       d.credit_days,
       d.credit_status,
-      d.fact_date,
-      d.created_at,
       d.created_by,
       d.updated_at,
       d.updated_by,
@@ -1361,6 +2029,15 @@ module.exports = {
   getClientAccountState,
   getClientAccountStateCount,
   getClientAccountStateSummary,
+  getClientAccountUnpaidInvoices,
+  getClientAccountInvoices,
+  getClientAccountInvoicesCount,
+  getClientAccountInvoicePayments,
+  getClientAccountOpeningBalance,
+  getClientAccountInvoiceMovements,
+  getClientAccountPaymentMovements,
+  getClientAccountNoteMovements,
+  getClientAccountMovements,
   getInventory,
   getInventoryCount,
   getInventorySummary,
