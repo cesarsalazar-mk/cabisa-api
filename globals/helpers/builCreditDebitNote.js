@@ -3,7 +3,6 @@ const isDevelop = false
 const emisorFact = isDevelop ? 'CABISA_DEMO' : 'CABISA, SOCIEDAD ANONIMA'
 const nit = isDevelop ? '92000000359K' : '53982746'
 
-
 const buildCreditDebitNote = (data, moment) => {
   //BUILD XML HEADER
   let xml_header = headerInvoice(data, moment)
@@ -12,7 +11,6 @@ const buildCreditDebitNote = (data, moment) => {
   let grandTotal = 0
 
   data.invoice.items.forEach(x => {
-    
     let price_ = x.payment_amount * x.payment_qty
     let taxableAmount = (price_ - 0) / 1.12
     let taxAmount = taxableAmount * 0.12
@@ -21,15 +19,15 @@ const buildCreditDebitNote = (data, moment) => {
     totalTaxAmount += taxAmount
     grandTotal += total
 
-    console.log("DATA DEBIT/CREDIT NOTE >> ",x)
-    
+    console.log('DATA DEBIT/CREDIT NOTE >> ', x)
+
     let str = `
       <dte:Item BienOServicio="B" NumeroLinea="1">
         <dte:Cantidad>${x.payment_qty.toFixed(2)}</dte:Cantidad>
         <dte:UnidadMedida>UND</dte:UnidadMedida>
         <dte:Descripcion>${x.payment_code}|${x.description}</dte:Descripcion>        
         <dte:PrecioUnitario>${x.payment_amount.toFixed(2)}</dte:PrecioUnitario>
-        <dte:Precio>${(price_).toFixed(2)}</dte:Precio>
+        <dte:Precio>${price_.toFixed(2)}</dte:Precio>
         <dte:Descuento>${0}</dte:Descuento>        
         <dte:Impuestos>
           <dte:Impuesto>
@@ -47,7 +45,7 @@ const buildCreditDebitNote = (data, moment) => {
   })
 
   let xmlBody = `<dte:Items>${xml_details}</dte:Items>`
-  console.log("")
+  console.log('')
   let xmlComplemento = `
   <dte:Complementos>
   <dte:Complemento IDComplemento="TEXT" NombreComplemento="TEXT" URIComplemento="TEXT">
@@ -105,16 +103,16 @@ const headerInvoice = (data, moment) => {
             </dte:DireccionReceptor>
           </dte:Receptor>
 
-          <dte:Frases>
-            <dte:Frase CodigoEscenario="2" TipoFrase="1"></dte:Frase>
+          <dte:Frases> 
+            <dte:Frase CodigoEscenario="3" TipoFrase="1" NumeroResolucion="446169202614222735" FechaResolucion="2026-09-16"></dte:Frase>
           </dte:Frases>
   `
 
   return headerStructure
 }
 
-const replaceAmpersand = (str) => {
-  return str.replace(/&/g, '&#38;');
-};
+const replaceAmpersand = str => {
+  return str.replace(/&/g, '&#38;')
+}
 
 module.exports = buildCreditDebitNote
