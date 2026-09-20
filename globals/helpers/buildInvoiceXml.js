@@ -10,7 +10,6 @@ const buildXml = (data, moment) => {
   let grandTotal = 0
 
   data.invoice.items.forEach(x => {
-    
     let price_ = x.price * x.quantity
     let taxableAmount = (price_ - x.discount) / 1.12
     let taxAmount = taxableAmount * 0.12
@@ -18,15 +17,15 @@ const buildXml = (data, moment) => {
 
     totalTaxAmount += taxAmount
     grandTotal += total
-    console.log("data >> ",x)
-    
+    console.log('data >> ', x)
+
     let str = `
-    <dte:Item BienOServicio="${x.type === "SERVICE" ? "S" : "B" }" NumeroLinea="1">
+    <dte:Item BienOServicio="${x.type === 'SERVICE' ? 'S' : 'B'}" NumeroLinea="1">
         <dte:Cantidad>${x.quantity.toFixed(2)}</dte:Cantidad>
         <dte:UnidadMedida>UND</dte:UnidadMedida>
         <dte:Descripcion>${x.code}|${x.description}</dte:Descripcion>        
         <dte:PrecioUnitario>${x.price.toFixed(2)}</dte:PrecioUnitario>
-        <dte:Precio>${(price_).toFixed(2)}</dte:Precio>
+        <dte:Precio>${price_.toFixed(2)}</dte:Precio>
         <dte:Descuento>${x.discount.toFixed(2)}</dte:Descuento>        
         <dte:Impuestos>
           <dte:Impuesto>
@@ -98,15 +97,15 @@ const headerInvoice = (data, moment) => {
           </dte:Receptor>
 
           <dte:Frases>
-            <dte:Frase CodigoEscenario="2" TipoFrase="1"></dte:Frase>
+            <dte:Frase CodigoEscenario="3" TipoFrase="1" NumeroResolucion="446169202614222735" FechaResolucion="2026-09-16"></dte:Frase>
           </dte:Frases>
   `
 
   return headerStructure
 }
 
-const replaceAmpersand = (str) => {
-  return str.replace(/&/g, '&#38;');
-};
+const replaceAmpersand = str => {
+  return str.replace(/&/g, '&#38;')
+}
 
 module.exports = buildXml
