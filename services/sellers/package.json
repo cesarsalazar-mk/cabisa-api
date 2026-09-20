@@ -1,0 +1,21 @@
+{
+  "name": "cabisa-api",
+  "version": "1.0.0",
+  "description": "API Services",
+  "main": "handler.js",
+  "author": "Cesar Salazar",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "deploy": "export AWS_PROFILE=cabisa && serverless deploy",
+    "sls-local": "nodemon --exec sls offline"
+  },
+  "license": "ISC",
+  "dependencies": {
+    "aws-sdk": "^2.467.0",
+    "lambda-warmer": "^1.2.1",
+    "mysql2": "^1.6.5"
+  },
+  "devDependencies": {
+    "serverless-offline": "^4.10.3"
+  }
+}

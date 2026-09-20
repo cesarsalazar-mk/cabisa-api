@@ -1,0 +1,70 @@
+service: ca-sellers
+
+plugins:
+  - serverless-offline
+
+custom:
+  config: ../../envs/credentials.${self:provider.stage}.json
+
+provider:
+  name: aws
+  runtime: nodejs18.x
+  stage: ${opt:stage, 'prod'}
+  region: us-east-1
+  deploymentBucket:
+    name: ${file(${self:custom.config}):deploymentBucket}
+  environment:
+    STAGE: ${file(${self:custom.config}):stage}
+    ACCOUNT_ID: ${file(${self:custom.config}):awsAccountId}
+    FILE_ENVIRONMENT: ${file(${self:custom.config}):fileEnvironment}
+    RUN_LIKE: ${file(${self:custom.config}):run_like}
+    DATABASE_HOST: ${file(${self:custom.config}):dbHost}
+    DATABASE_USER: ${file(${self:custom.config}):dbUser}
+    DATABASE_NAME: ${file(${self:custom.config}):dbName}
+    DATABASE_PASSWORD: ${file(${self:custom.config}):dbPassword}
+
+package:
+  exclude:
+    - node_modules/**
+  include:
+    - ../../globals/**
+functions:
+  sellers:
+    handler: handler.read
+    events:
+      - http:
+          path: sellers
+          method: get
+          cors: true
+    layers:
+      - arn:${file(${self:custom.config}):layer}
+
+  sellersCreate:
+    handler: handler.create
+    events:
+      - http:
+          path: sellers
+          method: post
+          cors: true
+    layers:
+      - arn:${file(${self:custom.config}):layer}
+
+  sellersUpdate:
+    handler: handler.update
+    events:
+      - http:
+          path: sellers
+          method: put
+          cors: true
+    layers:
+      - arn:${file(${self:custom.config}):layer}
+
+  sellersDelete:
+    handler: handler.delete
+    events:
+      - http:
+          path: sellers
+          method: delete
+          cors: true
+    layers:
+      - arn:${file(${self:custom.config}):layer}
