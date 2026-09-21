@@ -1,5 +1,5 @@
 const mysql = require('mysql2/promise')
-const { mysqlConfig, helpers, types } = require(`${process.env['FILE_ENVIRONMENT']}/globals`)
+const { mysqlConfig, helpers, types, ValidatorException } = require(`${process.env['FILE_ENVIRONMENT']}/globals`)
 const storage = require('./storage')
 const { handleRead, handleRequest, handleResponse, invoiceAdjustments } = helpers
 const db = mysqlConfig(mysql)
@@ -1329,6 +1329,60 @@ module.exports.exportReport = async event => {
           { name: 'Total vendido', column: 'total_amount', width: 15, numFmt: '"Q"#,##0.00' },
         ]
         break
+      case "commissionsReport":
+        req.hasPermissions([types.permissions.REPORTS])
+        result = await handleRead(req, { dbQuery: db.query, storage: storage.getCommissionReport })
+        result.data = result.data.map(row => ({
+          ...row,
+          commission_percentage: Number(row.commission_percentage) / 100,
+          is_paid_spanish: row.invoice_status === 'CANCELLED' ? 'Anulada' : Number(row.is_paid) ? 'Pagada' : 'No pagada',
+          commission_paid_spanish: row.commission_paid_at ? 'Pagada' : 'Por pagar',
+          commission_paid_amount: row.commission_paid_amount == null ? null : Number(row.commission_paid_amount),
+        }))
+        manifestoHeaders = [
+          { name: '# Documento', column: 'document_number', width: 18 },
+          { name: 'Fecha', column: 'document_date', width: 14, numFmt: 'dd-mm-yyyy' },
+          { name: 'Nit', column: 'stakeholder_nit', width: 15 },
+          { name: 'Cliente', column: 'stakeholder_name', width: 40 },
+          { name: 'Vendedor', column: 'seller_name', width: 25 },
+          { name: 'Total factura', column: 'total_amount', width: 16, numFmt: '"Q"#,##0.00' },
+          { name: 'Base (para comision)', column: 'base_amount', width: 18, numFmt: '"Q"#,##0.00' },
+          { name: '% Comision', column: 'commission_percentage', width: 12, numFmt: '0.00%' },
+          { name: 'Comision', column: 'commission_amount', width: 16, numFmt: '"Q"#,##0.00' },
+          { name: 'Estado factura', column: 'is_paid_spanish', width: 16 },
+          { name: 'Comision pagada al vendedor', column: 'commission_paid_spanish', width: 26 },
+          { name: 'Fecha pago comision', column: 'commission_paid_at', width: 20, numFmt: 'dd-mm-yyyy hh:mm:ss' },
+          { name: 'Monto pagado', column: 'commission_paid_amount', width: 16, numFmt: '"Q"#,##0.00' },
+        ]
+        break
+      case "commissionsSellersReport":
+        req.hasPermissions([types.permissions.REPORTS])
+        result = await handleRead(req, { dbQuery: db.query, storage: storage.getCommissionSummary })
+        result.data = buildCommissionSummary(result.data).by_seller.map(seller => ({
+          seller_name: seller.seller_name,
+          commission_percentage: seller.commission_percentage / 100,
+          to_pay_count: seller.to_pay.invoices_count,
+          to_pay_commission: seller.to_pay.commission_amount,
+          paid_count: seller.commission_paid.invoices_count,
+          paid_commission: seller.commission_paid.commission_amount,
+          cancelled_count: seller.cancelled_paid.invoices_count,
+          cancelled_commission: seller.cancelled_paid.commission_amount,
+          unpaid_count: seller.unpaid.invoices_count,
+          unpaid_commission: seller.unpaid.commission_amount,
+        }))
+        manifestoHeaders = [
+          { name: 'Vendedor', column: 'seller_name', width: 28 },
+          { name: 'Comision', column: 'commission_percentage', width: 12, numFmt: '0.00%' },
+          { name: 'Facturas por pagar comision', column: 'to_pay_count', width: 22 },
+          { name: 'Comision por pagar', column: 'to_pay_commission', width: 18, numFmt: '"Q"#,##0.00' },
+          { name: 'Facturas comision pagada', column: 'paid_count', width: 22 },
+          { name: 'Comision ya pagada', column: 'paid_commission', width: 18, numFmt: '"Q"#,##0.00' },
+          { name: 'Facturas anuladas con comision pagada', column: 'cancelled_count', width: 30 },
+          { name: 'Comision pagada a facturas anuladas', column: 'cancelled_commission', width: 30, numFmt: '"Q"#,##0.00' },
+          { name: 'Facturas no pagadas (cliente)', column: 'unpaid_count', width: 24 },
+          { name: 'Comision pendiente', column: 'unpaid_commission', width: 18, numFmt: '"Q"#,##0.00' },
+        ]
+        break
       default:
         break;
     }
@@ -1496,3 +1550,128 @@ const standardReport = data =>
 
     resolve(workbook)
   })
+// Agrupa las filas (vendedor x bucket) de storage.getCommissionSummary
+const buildCommissionSummary = summaryRows => {
+  const toNumber = value => Number(value) || 0
+  const emptyTotals = () => ({ invoices_count: 0, total_amount: 0, base_amount: 0, commission_amount: 0 })
+  const addTotals = (totals, row) => ({
+    invoices_count: totals.invoices_count + toNumber(row.invoices_count),
+    total_amount: totals.total_amount + toNumber(row.total_amount),
+    base_amount: totals.base_amount + toNumber(row.base_amount),
+    commission_amount: totals.commission_amount + toNumber(row.commission_amount),
+  })
+  const bucketKeys = { TO_PAY: 'to_pay', COMMISSION_PAID: 'commission_paid', CANCELLED_PAID: 'cancelled_paid', UNPAID: 'unpaid' }
+  const bySeller = {}
+  const summary = { to_pay: emptyTotals(), commission_paid: emptyTotals(), cancelled_paid: emptyTotals(), unpaid: emptyTotals() }
+
+  summaryRows.forEach(row => {
+    const key = bucketKeys[row.bucket]
+    const seller = (bySeller[row.seller_id] = bySeller[row.seller_id] || {
+      seller_id: row.seller_id,
+      seller_name: row.seller_name,
+      commission_percentage: toNumber(row.commission_percentage),
+      to_pay: emptyTotals(),
+      commission_paid: emptyTotals(),
+      cancelled_paid: emptyTotals(),
+      unpaid: emptyTotals(),
+    })
+
+    seller[key] = addTotals(seller[key], row)
+    summary[key] = addTotals(summary[key], row)
+  })
+
+  return { ...summary, by_seller: Object.values(bySeller) }
+}
+
+// body: { document_ids: [..], paid: true|false, exclude_iva: '1'|'0' }
+// Al marcar, congela la comision mostrada (segun exclude_iva). Solo facturas 100% pagadas por el cliente.
+module.exports.markCommissionsPaid = async event => {
+  try {
+    const req = await handleRequest({ event })
+
+    req.hasPermissions([types.permissions.REPORTS])
+
+    const { document_ids, paid, exclude_iva } = req.body || {}
+    const ids = [...new Set((document_ids || []).map(Number).filter(Boolean))]
+
+    if (!ids.length) throw new ValidatorException(['Debe seleccionar al menos una factura'])
+
+    const res = await db.transaction(async connection => {
+      if (paid === false) {
+        await connection.query(storage.unmarkCommissionsPaid(ids))
+
+        return { statusCode: 200, data: { document_ids: ids }, message: 'Comisiones desmarcadas exitosamente' }
+      }
+
+      const rows = await db.query(storage.getCommissionReport({ document_ids: ids, exclude_iva }))
+      const rowsById = rows.reduce((r, row) => ({ ...r, [row.id]: row }), {})
+      const errors = []
+      const label = id => rowsById[id]?.document_number || `#${id}`
+
+      ids.forEach(id => {
+        const row = rowsById[id]
+
+        if (!row) errors.push(`La factura ${label(id)} no existe, no esta aprobada o no tiene vendedor`)
+        else if (!row.is_paid) errors.push(`La factura ${label(id)} no esta 100% pagada por el cliente`)
+        else if (row.commission_paid_at) errors.push(`La comision de la factura ${label(id)} ya esta marcada como pagada`)
+      })
+
+      if (errors.length > 0) throw new ValidatorException(errors)
+
+      for (const id of ids) {
+        await connection.query(storage.markCommissionsPaid(), [rowsById[id].commission_amount, req.currentUser.user_id, id])
+      }
+
+      return { statusCode: 200, data: { document_ids: ids }, message: 'Comisiones marcadas como pagadas exitosamente' }
+    })
+
+    return await handleResponse({ req, res })
+  } catch (error) {
+    console.log(error)
+    return await handleResponse({ error })
+  }
+}
+
+module.exports.commissions = async event => {
+  try {
+    const req = await handleRequest({ event })
+
+    req.hasPermissions([types.permissions.REPORTS])
+
+    const toNumber = value => Number(value) || 0
+
+    const [rows, countRows, summaryRows] = await Promise.all([
+      db.query(storage.getCommissionReport(req.query)),
+      db.query(storage.getCommissionReportCount(req.query)),
+      db.query(storage.getCommissionSummary(req.query)),
+    ])
+
+    const items = rows.map(row => ({
+      ...row,
+      is_paid: Boolean(row.is_paid),
+      is_cancelled: row.invoice_status === 'CANCELLED',
+      is_commission_paid: Boolean(row.commission_paid_at),
+      commission_paid_amount: row.commission_paid_amount == null ? null : toNumber(row.commission_paid_amount),
+      total_amount: toNumber(row.total_amount),
+      paid_amount: toNumber(row.paid_amount),
+      base_amount: toNumber(row.base_amount),
+      commission_percentage: toNumber(row.commission_percentage),
+      commission_amount: toNumber(row.commission_amount),
+    }))
+
+    return await handleResponse({
+      req,
+      res: {
+        statusCode: 200,
+        data: {
+          items,
+          summary: buildCommissionSummary(summaryRows),
+          pagination: { total: toNumber(countRows[0]?.total) },
+        },
+      },
+    })
+  } catch (error) {
+    console.log(error)
+    return await handleResponse({ error })
+  }
+}

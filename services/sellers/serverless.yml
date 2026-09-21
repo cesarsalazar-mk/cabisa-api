@@ -59,6 +59,16 @@ functions:
     layers:
       - arn:${file(${self:custom.config}):layer}
 
+  sellersReactivate:
+    handler: handler.reactivate
+    events:
+      - http:
+          path: sellers/reactivate
+          method: put
+          cors: true
+    layers:
+      - arn:${file(${self:custom.config}):layer}
+
   sellersDelete:
     handler: handler.delete
     events:

@@ -28,7 +28,6 @@ const validateSeller = ({ id, name, email, commission_percentage }, requireId = 
 module.exports.read = async event => {
   try {
     const req = await handleRequest({ event })
-    req.hasPermissions([types.permissions.SALES])
 
     const res = await handleRead(req, { dbQuery: db.query, storage: storage.findAllBy })
 
@@ -103,6 +102,28 @@ module.exports.delete = async event => {
       await connection.query(storage.deleteSeller(), [req.currentUser.user_id, id])
 
       return { statusCode: 200, data: { id }, message: 'Vendedor eliminado exitosamente' }
+    })
+
+    return await handleResponse({ req, res })
+  } catch (error) {
+    console.log(error)
+    return await handleResponse({ error })
+  }
+}
+
+module.exports.reactivate = async event => {
+  try {
+    const req = await handleRequest({ event, inputType: { id: { type: ['number', 'string'], required: true } } })
+    req.hasPermissions([types.permissions.SALES])
+
+    const { id } = req.body
+
+    if (!id) throw new ValidatorException(['El campo id es requerido'])
+
+    const res = await db.transaction(async connection => {
+      await connection.query(storage.reactivateSeller(), [req.currentUser.user_id, id])
+
+      return { statusCode: 200, data: { id }, message: 'Vendedor reactivado exitosamente' }
     })
 
     return await handleResponse({ req, res })

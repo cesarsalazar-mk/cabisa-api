@@ -430,6 +430,7 @@ module.exports.invoice = async event => {
     document_number: { type: ['string', 'number'], required: true },
     uuid: { type: ['string', 'number'], required: true },
     fact_date: { type: ['string', 'number'], required: false },
+    seller_id: { type: ['string', 'number'] },
   }
 
   try {
