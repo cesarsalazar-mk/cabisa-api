@@ -341,17 +341,19 @@ const buildClientAccountInnerQuery = (filterFields = {}, asOfDate = null) => {
   `
 }
 
+// account_status: AL_DIA (saldo <= 0) | POR_VENCER (saldo, ninguna factura vencida) | VENCIDO (1-90 dias de atraso) | VENCIDO_90 (mas de 90)
+// Cada filtro devuelve un solo estado. WITH_DEBT es el unico que agrupa todo lo diferente a pagado.
 const buildClientAccountDebtFilter = (debtStatus = '') => {
-  if (
-    debtStatus === 'WITH_DEBT' ||
-    debtStatus === 'UNPAID' ||
-    debtStatus === 'PENDING'
-  ) {
+  if (debtStatus === 'WITH_DEBT') {
     return " AND clients.account_status <> 'AL_DIA'"
   }
 
-  if (debtStatus === 'OVERDUE' || debtStatus === 'WITH_DEBT_OVER_120') {
-    return " AND clients.account_status IN ('VENCIDO', 'VENCIDO_90')"
+  if (debtStatus === 'UNPAID' || debtStatus === 'PENDING' || debtStatus === 'POR_VENCER') {
+    return " AND clients.account_status = 'POR_VENCER'"
+  }
+
+  if (debtStatus === 'OVERDUE' || debtStatus === 'VENCIDO') {
+    return " AND clients.account_status = 'VENCIDO'"
   }
 
   if (debtStatus === 'WITH_DEBT_OVER_90' || debtStatus === 'VENCIDO_90') {
