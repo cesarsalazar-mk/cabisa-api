@@ -1228,11 +1228,25 @@ const getInventorySummary = (fields = {}) => `
 const getInvoiceTypeCondition = (alias = 'd') =>
   `(${alias}.document_type = '${types.documentsTypes.SELL_INVOICE}' OR ${alias}.document_type = '${types.documentsTypes.RENT_INVOICE}')`
 
+// payment_status (PAID | UNPAID) no es columna: se filtra por saldo = total ajustado (notas credito/debito) - pagos.
+// Mismo criterio del estado de cuenta de clientes; solo aplica a facturas aprobadas.
+const buildInvoicePaymentStatusWhere = (paymentStatus, docAlias) => {
+  const status = String(paymentStatus || '').toUpperCase()
+
+  if (status !== 'PAID' && status !== 'UNPAID') return ''
+
+  return ` AND ${docAlias}.status = '${types.documentsStatus.APPROVED}' AND (
+    ${docAlias}.total_amount
+    + ${getDocumentNetAdjustmentSql(docAlias)}
+    - ${CLIENT_PAYMENTS_TO_DATE_SQL(docAlias, 'CURDATE()')}
+  ) ${status === 'PAID' ? '<=' : '>'} 0.009`
+}
+
 const buildInvoiceReportWhere = (fields = {}, docAlias = 'd', stakeholderAlias = 's') => {
-  const filterFields = stripPaginationFields(fields)
+  const { payment_status, ...filterFields } = stripPaginationFields(fields)
   const rawWhereConditions = getWhereConditions({ fields: filterFields, tableAlias: docAlias })
 
-  return rawWhereConditions
+  const mappedConditions = rawWhereConditions
     .replace(new RegExp(`${docAlias}\\.nit`, 'gi'), `${stakeholderAlias}.nit`)
     .replace(new RegExp(`${docAlias}\\.name`, 'gi'), `${stakeholderAlias}.name`)
     .replace(
@@ -1255,6 +1269,9 @@ const buildInvoiceReportWhere = (fields = {}, docAlias = 'd', stakeholderAlias =
       new RegExp(`${docAlias}\\.end_date`, 'gi'),
       toFactDateSql(`${docAlias}.fact_date`)
     )
+
+  // La condicion de pago va despues de los reemplazos para que no los afecten
+  return `${mappedConditions}${buildInvoicePaymentStatusWhere(payment_status, docAlias)}`
 }
 
 const getInvoice = (fields = {}) => {
@@ -1310,6 +1327,7 @@ const getInvoice = (fields = {}) => {
             ELSE 'NO DISPONIBLE' END as payment_method_spanish,
       d.credit_days,
       d.credit_status,
+      ${CLIENT_PAYMENTS_TO_DATE_SQL('d', 'CURDATE()')} AS paid_amount,
       d.created_by,
       d.updated_at,
       d.updated_by,

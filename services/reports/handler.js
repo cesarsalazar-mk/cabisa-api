@@ -8,6 +8,21 @@ const Excel = require('exceljs')
 const enrichReportDocuments = (documents, totalField = 'total') =>
   invoiceAdjustments.enrichDocumentsWithAdjustments(documents, db.query, { totalField })
 
+// Estado de pago de la factura: pagada si el total ajustado (con notas de credito/debito) menos los pagos es <= 0.009.
+// Mismo criterio del estado de cuenta de clientes. Solo aplica a facturas aprobadas.
+const addPaymentStatus = rows =>
+  rows.map(row => {
+    const isApproved = row.status === 'APPROVED'
+    const unpaid = Number(row.adjusted_total ?? row.total ?? 0) - Number(row.paid_amount || 0)
+    const payment_status = !isApproved ? null : unpaid <= 0.009 ? 'PAID' : 'UNPAID'
+
+    return {
+      ...row,
+      payment_status,
+      payment_status_spanish: { PAID: 'Pagada', UNPAID: 'Pendiente de pago' }[payment_status] || 'N/A',
+    }
+  })
+
 const applyAdjustedExportValues = rows =>
   rows.map(row => {
     const adjustedTotal = Number(row.adjusted_total ?? row.total_amount ?? row.total ?? 0)
@@ -656,7 +671,7 @@ module.exports.getDocumentReport = async (event, context) => {
       ...invoice,
       discount_percentage: invoice.products[0]?.discount_percentage,
     }))
-    const enrichedItems = await enrichReportDocuments(items, 'total')
+    const enrichedItems = addPaymentStatus(await enrichReportDocuments(items, 'total'))
 
     return await handleResponse({
       req,
@@ -977,7 +992,8 @@ module.exports.exportReport = async event => {
           { name: 'Fecha de Certificacion', column: 'fact_date', width: 18, numFmt: 'dd-mm-yyyy hh:mm:ss'},
           { name: 'Total', column: 'total', width: 14 ,numFmt: '"Q"#,##0.00'},
           { name: 'Metodo de pago', column: 'payment_method_spanish', width: 17 },
-          { name: 'Estado', column: 'status_spanish', width: 17 }      
+          { name: 'Estado', column: 'status_spanish', width: 17 },
+          { name: 'Estado de pago', column: 'payment_status_spanish', width: 20 }
         ]
         break;
       case "cashReceipts":
@@ -1389,7 +1405,7 @@ module.exports.exportReport = async event => {
 
     if (reportType === 'documentReport' && result?.data?.length) {
       result.data = applyAdjustedExportValues(
-        await enrichReportDocuments(result.data, 'total')
+        addPaymentStatus(await enrichReportDocuments(result.data, 'total'))
       )
     }
 
