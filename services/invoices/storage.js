@@ -82,6 +82,8 @@ const findAllBy = (fields = {}) => {
       d.fact_date,
       d.document_type,
       d.stakeholder_id,
+      d.seller_id,
+      sl.name AS seller_name,
       s.name AS stakeholder_name,
       s.nit AS stakeholder_nit,
       s.stakeholder_type AS stakeholder_type,
@@ -126,6 +128,7 @@ const findAllBy = (fields = {}) => {
     FROM documents d
     LEFT JOIN projects proj ON proj.id = d.project_id
     LEFT JOIN stakeholders s ON s.id = d.stakeholder_id
+    LEFT JOIN sellers sl ON sl.id = d.seller_id
     LEFT JOIN documents_products dp ON dp.document_id = d.id
     LEFT JOIN products prod ON prod.id = dp.product_id
     WHERE ${getInvoiceTypeCondition('d')} ${whereConditions}${systemInvoiceSql}
@@ -223,7 +226,21 @@ const checkDocumentByUuid = () => `
   LIMIT 1
 `
 
+const checkInvoiceExists = () => `
+  SELECT id, seller_id, commission_paid_at, commission_paid_amount FROM documents WHERE id = ? AND ${getInvoiceTypeCondition('documents')}
+`
+
+const checkSellerExists = () => `SELECT id FROM sellers WHERE id = ? AND is_active = 1`
+
+// updated_at = updated_at evita que el cambio de vendedor modifique la fecha usada por reportes
+const updateInvoiceSeller = () => `
+  UPDATE documents SET seller_id = ?, updated_by = ?, updated_at = updated_at WHERE id = ?
+`
+
 module.exports = {
+  checkInvoiceExists,
+  checkSellerExists,
+  updateInvoiceSeller,
   checkInventoryMovementsOnApprove,
   checkProjectExists,
   findAllBy,

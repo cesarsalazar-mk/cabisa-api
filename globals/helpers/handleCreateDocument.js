@@ -1,7 +1,6 @@
 const { creditsPolicy, documentsTypes } = require('../types')
 const { getFormattedDates, formatFelFecha } = require('../common')
 // res.excludeProductOnCreateDetail: product_id
-// res.calculateSalesCommission: boolean
 // res.saveInventoryUnitValueAsProductPrice: boolean
 
 // IMPORTANTE: especificar en el req.body el document_type del documento a crear
@@ -60,12 +59,10 @@ const handleCreateDocument = async (req, res) => {
     uuid = null,
     created_at = null,
     fact_date = null,
+    seller_id = null,
   } = req.body
   
   const related_internal_document_id = document_id
-  const salesCommissionPercentage = req.currentUser.sales_commission / 100
-  const sales_commission_amount =
-    res.calculateSalesCommission && !isNaN(salesCommissionPercentage) ? subtotal_amount * salesCommissionPercentage : null
 
   const { created_at: resolvedCreatedAt } = getFormattedDates({
     created_at: created_at || new Date().toISOString(),
@@ -91,7 +88,6 @@ const handleCreateDocument = async (req, res) => {
     end_date,
     cancel_reason,
     subtotal_amount,
-    sales_commission_amount,
     total_discount_amount,
     total_tax_amount,
     total_amount,
@@ -107,6 +103,8 @@ const handleCreateDocument = async (req, res) => {
     resolvedCreatedAt,
     resolvedFactDate,
     related_internal_document_id,
+    // el vendedor se asocia solo a la factura, no a la pre-factura / nota de servicio
+    document_type === documentsTypes.SELL_INVOICE || document_type === documentsTypes.RENT_INVOICE ? seller_id : null,
   ]})
   
   const newDocumentId = await res.connection.geLastInsertId()
@@ -151,7 +149,6 @@ const createDocument = () => `
       end_date,
       cancel_reason,
       subtotal_amount,
-      sales_commission_amount,
       total_discount_amount,
       total_tax_amount,
       total_amount,
@@ -165,7 +162,8 @@ const createDocument = () => `
       uuid,
       created_at,
       fact_date,
-      related_internal_document_id
+      related_internal_document_id,
+      seller_id
     )
   VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `

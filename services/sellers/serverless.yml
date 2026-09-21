@@ -1,4 +1,4 @@
-service: ca-repairs
+service: ca-sellers
 
 plugins:
   - serverless-offline
@@ -29,62 +29,52 @@ package:
   include:
     - ../../globals/**
 functions:
-  repairs:
+  sellers:
     handler: handler.read
     events:
       - http:
-          path: repairs
+          path: sellers
           method: get
           cors: true
     layers:
       - arn:${file(${self:custom.config}):layer}
 
-  repairsStatus:
-    handler: handler.readRepairsStatus
-    events:
-      - http:
-          path: repairs-status
-          method: get
-          cors: true
-    layers:
-      - arn:${file(${self:custom.config}):layer}
-
-  repairsCreate:
+  sellersCreate:
     handler: handler.create
     events:
       - http:
-          path: repairs
+          path: sellers
           method: post
           cors: true
     layers:
       - arn:${file(${self:custom.config}):layer}
 
-  repairsApprove:
-    handler: handler.approve
-    events:
-      - http:
-          path: repairs/approve
-          method: put
-          cors: true
-    layers:
-      - arn:${file(${self:custom.config}):layer}
-
-  repairsUpdate:
+  sellersUpdate:
     handler: handler.update
     events:
       - http:
-          path: repairs
+          path: sellers
           method: put
           cors: true
     layers:
       - arn:${file(${self:custom.config}):layer}
 
-  repairsCancel:
-    handler: handler.cancel
+  sellersReactivate:
+    handler: handler.reactivate
     events:
       - http:
-          path: repairs/cancel
+          path: sellers/reactivate
           method: put
+          cors: true
+    layers:
+      - arn:${file(${self:custom.config}):layer}
+
+  sellersDelete:
+    handler: handler.delete
+    events:
+      - http:
+          path: sellers
+          method: delete
           cors: true
     layers:
       - arn:${file(${self:custom.config}):layer}

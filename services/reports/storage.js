@@ -2068,7 +2068,126 @@ const getTopSoldItem = (fields = {}, itemType) => {
   `
 }
 
+// ---- Reporte de comisiones de vendedores ----
+// Factura pagada = saldo (total + notas credito/debito - pagos) <= 0.009 (mismo criterio que estado de cuenta de clientes).
+// Comision = (total ajustado / 1.12) * sellers.commission_percentage / 100. El 1.12 quita el IVA (12%);
+// con exclude_iva=0 la comision se calcula sobre el total sin quitar IVA (default: se quita).
+const COMMISSION_IVA_DIVISOR = 1.12
+
+const buildCommissionRowsSql = (fields = {}, { applyPaymentFilter = true } = {}) => {
+  const digits = value => String(value || '').replace(/[^\d]/g, '')
+  const stakeholderId = digits(fields.stakeholder_id)
+  const sellerId = digits(fields.seller_id)
+  const paymentStatus = String(fields.payment_status || 'ALL').toUpperCase()
+  const divisor = String(fields.exclude_iva) === '0' ? 1 : COMMISSION_IVA_DIVISOR
+  const commissionStatus = String(fields.commission_status || 'ALL').toUpperCase()
+  const documentIds = [].concat(fields.document_ids || []).map(digits).filter(Boolean)
+  const dateSql = CLIENT_INVOICE_DATE_SQL('d')
+  // payment_status y commission_status filtran solo la lista; el resumen los ignora
+  const outerFilters = []
+
+  if (applyPaymentFilter && paymentStatus !== 'ALL')
+    outerFilters.push(`inv.invoice_status = 'APPROVED' AND inv.total_amount - inv.paid_amount ${paymentStatus === 'PAID' ? '<=' : '>'} 0.009`)
+  if (applyPaymentFilter && commissionStatus !== 'ALL')
+    outerFilters.push(`inv.commission_paid_at IS ${commissionStatus === 'PAID' ? 'NOT ' : ''}NULL`)
+
+  const paymentFilter = outerFilters.length ? `WHERE ${outerFilters.join(' AND ')}` : ''
+
+  return `
+    SELECT
+      inv.*,
+      CASE WHEN inv.invoice_status = 'APPROVED' AND inv.total_amount - inv.paid_amount <= 0.009 THEN 1 ELSE 0 END AS is_paid,
+      ROUND(inv.total_amount / ${divisor}, 2) AS base_amount,
+      ROUND(ROUND(inv.total_amount / ${divisor}, 2) * inv.commission_percentage / 100, 2) AS commission_amount
+    FROM (
+      SELECT
+        d.id,
+        ${CLIENT_DOCUMENT_NUMBER_SQL('d')} AS document_number,
+        d.serie,
+        ${dateSql} AS document_date,
+        d.stakeholder_id,
+        s.name AS stakeholder_name,
+        s.nit AS stakeholder_nit,
+        d.seller_id,
+        sl.name AS seller_name,
+        sl.commission_percentage,
+        d.status AS invoice_status,
+        d.commission_paid_at,
+        d.commission_paid_amount,
+        (d.total_amount + ${getDocumentNetAdjustmentSql('d')}) AS total_amount,
+        ${CLIENT_PAYMENTS_TO_DATE_SQL('d', 'CURDATE()')} AS paid_amount
+      FROM documents d
+      JOIN sellers sl ON sl.id = d.seller_id
+      LEFT JOIN stakeholders s ON s.id = d.stakeholder_id
+      WHERE ${CLIENT_INVOICE_TYPES_SQL('d')}
+        AND (
+          d.status = '${types.documentsStatus.APPROVED}'
+          OR (d.status = '${types.documentsStatus.CANCELLED}' AND d.commission_paid_at IS NOT NULL)
+        )
+        ${stakeholderId ? `AND d.stakeholder_id = ${stakeholderId}` : ''}
+        ${sellerId ? `AND d.seller_id = ${sellerId}` : ''}
+        ${documentIds.length ? `AND d.id IN (${documentIds.join(',')})` : ''}
+        ${buildClientAccountDateFilter(dateSql, {
+          startDate: extractClientAccountDateValue(fields.start_date),
+          endDate: extractClientAccountDateValue(fields.end_date),
+        })}
+    ) inv
+    ${paymentFilter}
+  `
+}
+
+const getCommissionReport = (fields = {}) => `
+  SELECT * FROM (${buildCommissionRowsSql(fields)}) r
+  ORDER BY r.document_date DESC, r.id DESC
+  ${buildPaginationSQL(fields)};
+`
+
+const getCommissionReportCount = (fields = {}) => `
+  SELECT COUNT(*) AS total FROM (${buildCommissionRowsSql(fields)}) r;
+`
+
+// El resumen ignora payment_status y commission_status. Cada factura cae en un solo bucket:
+// CANCELLED_PAID (factura anulada con comision ya pagada), COMMISSION_PAID (comision ya marcada, usa el monto congelado),
+// TO_PAY (factura pagada, comision sin pagar) o UNPAID (factura sin pagar)
+const getCommissionSummary = (fields = {}) => `
+  SELECT
+    r.seller_id,
+    r.seller_name,
+    r.commission_percentage,
+    CASE
+      WHEN r.invoice_status = 'CANCELLED' THEN 'CANCELLED_PAID'
+      WHEN r.commission_paid_at IS NOT NULL THEN 'COMMISSION_PAID'
+      WHEN r.is_paid = 1 THEN 'TO_PAY'
+      ELSE 'UNPAID'
+    END AS bucket,
+    COUNT(*) AS invoices_count,
+    COALESCE(SUM(r.total_amount), 0) AS total_amount,
+    COALESCE(SUM(r.base_amount), 0) AS base_amount,
+    COALESCE(SUM(CASE WHEN r.commission_paid_at IS NOT NULL THEN r.commission_paid_amount ELSE r.commission_amount END), 0) AS commission_amount
+  FROM (${buildCommissionRowsSql(fields, { applyPaymentFilter: false })}) r
+  GROUP BY r.seller_id, r.seller_name, r.commission_percentage, bucket
+  ORDER BY r.seller_name;
+`
+
+const markCommissionsPaid = () => `
+  UPDATE documents
+  SET commission_paid_at = NOW(), commission_paid_amount = ?, commission_paid_by = ?, updated_at = updated_at
+  WHERE id = ? AND commission_paid_at IS NULL
+`
+
+// updated_at = updated_at evita alterar la fecha que usan otros reportes
+const unmarkCommissionsPaid = ids => `
+  UPDATE documents
+  SET commission_paid_at = NULL, commission_paid_amount = NULL, commission_paid_by = NULL, updated_at = updated_at
+  WHERE id IN (${ids.map(id => Number(id)).join(',')}) AND ${CLIENT_INVOICE_TYPES_SQL('documents')}
+`
+
 module.exports = {
+  getCommissionReport,
+  getCommissionReportCount,
+  getCommissionSummary,
+  markCommissionsPaid,
+  unmarkCommissionsPaid,
   getAccountsReceivable,
   getClientAccountState,
   getClientAccountStateCount,

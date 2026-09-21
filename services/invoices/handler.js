@@ -68,6 +68,7 @@ const draftInvoiceInputType = {
     },
   },
   created_at: { type: ['string', 'number'], required: false },
+  seller_id: { type: ['string', 'number'] },
 }
 
 const loadInvoiceForCertify = async documentId => {
@@ -259,6 +260,7 @@ module.exports.create = async event => {
     uuid: { type: ['string', 'number'], required: true },
     fact_date: { type: ['string', 'number'], required: false },
     created_at: { type: ['string', 'number'], required: false },
+    seller_id: { type: ['string', 'number'] },
   }
 
   try {
@@ -942,6 +944,8 @@ module.exports.cancel = async event => {
 
     if (errors.length > 0) throw new ValidatorException(errors)
 
+    const [commissionInfo] = await db.query(storage.checkInvoiceExists(), [document_id])
+
     const { res } = await db.transaction(async connection => {
       const documentCancelled = await handleCancelDocument({ ...req, body: { ...document, ...req.body } }, { connection })
 
@@ -968,6 +972,45 @@ module.exports.cancel = async event => {
         { ...inventoryMovementsCancelled.req, body: { ...inventoryMovementsCancelled.req.body, old_inventory_movements: [] } },
         { ...inventoryMovementsCancelled.res, updateStockOn: types.actions.CANCELLED }
       )
+    })
+
+    // Aviso (no bloquea): la factura anulada tenia la comision pagada al vendedor
+    if (commissionInfo?.commission_paid_at)
+      res.data = { ...res.data, commission_paid_amount: Number(commissionInfo.commission_paid_amount) }
+
+    return await handleResponse({ req, res })
+  } catch (error) {
+    console.log(error)
+    return await handleResponse({ error })
+  }
+}
+
+module.exports.updateSeller = async event => {
+  try {
+    const req = await handleRequest({
+      event,
+      inputType: { id: { type: ['number', 'string'], required: true }, seller_id: { type: ['number', 'string'] } },
+    })
+    req.hasPermissions([types.permissions.INVOICES])
+
+    const { id, seller_id } = req.body
+    const errors = []
+    const [invoice] = id ? await db.query(storage.checkInvoiceExists(), [id]) : []
+    const sellerChanged = Number(seller_id || 0) !== Number(invoice?.seller_id || 0)
+    const [seller] = seller_id && sellerChanged ? await db.query(storage.checkSellerExists(), [seller_id]) : []
+
+    if (!id) errors.push('El campo id es requerido')
+    if (id && !invoice) errors.push('La factura no se encuentra registrada')
+    if (sellerChanged && invoice?.commission_paid_at)
+      errors.push('No se puede cambiar el vendedor: la comision de esta factura ya esta marcada como pagada. Desmarcala primero en el Reporte de Comisiones')
+    if (seller_id && sellerChanged && !seller) errors.push('El vendedor no se encuentra registrado')
+
+    if (errors.length > 0) throw new ValidatorException(errors)
+
+    const res = await db.transaction(async connection => {
+      await connection.query(storage.updateInvoiceSeller(), [seller_id || null, req.currentUser.user_id, id])
+
+      return { statusCode: 200, data: { id, seller_id: seller_id || null }, message: 'Vendedor de la factura actualizado exitosamente' }
     })
 
     return await handleResponse({ req, res })
