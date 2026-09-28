@@ -15,7 +15,7 @@
     "db-migrate-mysql": "^2.1.2",
     "lambda-warmer": "^1.2.1",
     "moment-timezone": "^0.5.25",
-    "mysql2": "^1.6.5",
+    "mysql2": "^3.11.0",
     "uuid": "^8.3.2",
     "xml2js": "^0.4.23",
     "exceljs": "^4.2.1"
