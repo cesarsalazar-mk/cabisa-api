@@ -1964,6 +1964,7 @@ const SALES_CATEGORY_SPANISH_SQL = `
     WHEN '${types.salesCategories.SE}' THEN 'Equipo'
     WHEN '${types.salesCategories.SF}' THEN 'Fosa'
     WHEN '${types.salesCategories.SO}' THEN 'Otros'
+    WHEN '${types.salesCategories.ST}' THEN 'Trailer'
     ELSE ''
   END`
 

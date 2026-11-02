@@ -127,7 +127,7 @@ create table products
         primary key,
     product_type          enum ('SERVICE', 'PRODUCT')                                      not null,
     product_category      enum ('EQUIPMENT', 'PART')                                       null,
-    sales_category        enum ('sc', 'se', 'sf', 'so')                                    null,
+    sales_category        enum ('sc', 'se', 'sf', 'so', 'st')                                    null,
     status                enum ('ACTIVE', 'INACTIVE', 'BLOCKED') default 'ACTIVE'          not null,
     description           varchar(255)                                                     not null,
     code                  varchar(50)                                                      not null,
