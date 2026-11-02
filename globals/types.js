@@ -70,6 +70,7 @@ const salesCategories = {
   SE: 'se',
   SF: 'sf',
   SO: 'so',
+  ST: 'st',
 }
 
 const productsStatus = {
